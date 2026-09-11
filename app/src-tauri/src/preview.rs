@@ -73,13 +73,15 @@ pub fn image_content_type(ext: &str) -> &'static str {
 
 /// The ACTIVE project's root — what [`abs_of`] resolves a stored repo-relative path against in the
 /// scheme routes. Reads the managed [`Projects`] state (same `try_state` idiom as
-/// [`entry_path_ext`]); degrades to [`crate::db::PROJECT_ROOT`] when the State is absent/poisoned so
-/// a preview is best-effort rather than a hard failure.
+/// [`entry_path_ext`]); degrades to `""` when the State is absent/poisoned.
+///
+/// `""` used to be one specific machine's volume. That is a worse failure than no preview at all:
+/// `abs_of` would have happily resolved a stored relative path against a folder the user never
+/// opened, and served whatever it found there. An empty root makes `abs_of` return an empty path,
+/// which fails at the file read — visibly, and against nothing.
 fn active_root(app: &tauri::AppHandle) -> String {
     use tauri::Manager;
-    app.try_state::<Projects>()
-        .map(|p| p.active_root())
-        .unwrap_or_else(|| crate::db::PROJECT_ROOT.to_string())
+    app.try_state::<Projects>().map(|p| p.active_root()).unwrap_or_default()
 }
 
 /// Look up an entry's `(path, ext)` by id from the read-only DB — the resolve step every scheme

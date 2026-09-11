@@ -992,11 +992,14 @@ mod tests {
     // ── §8 gate 7: Rust reconcile ↔ Python cold-manifest parity, under a NON-default config ─────────
 
     fn python_ok() -> bool {
-        let python = std::env::var("LENS_PYTHON")
-            .unwrap_or_else(|_| crate::db::PYTHON_BIN_DEFAULT.to_string());
+        let (Ok(python), Some(pkg_parent)) =
+            (crate::runtime::python_bin(), crate::runtime::pythonpath())
+        else {
+            return false;
+        };
         std::process::Command::new(&python)
             .args(["-c", "import repo_index"])
-            .env("PYTHONPATH", crate::db::REPO_INDEX_PKG_PARENT)
+            .env("PYTHONPATH", pkg_parent)
             .status()
             .map(|s| s.success())
             .unwrap_or(false)
@@ -1005,8 +1008,7 @@ mod tests {
     /// Run the REAL Python `walk` over `root` under `index_columns=False` (the `--no-columns`
     /// non-default config, §6.5) and return path → (size_bytes, extractor, parsed meta).
     fn python_manifest(root: &str) -> HashMap<String, (i64, String, serde_json::Value)> {
-        let python =
-            std::env::var("LENS_PYTHON").unwrap_or_else(|_| crate::db::PYTHON_BIN_DEFAULT.to_string());
+        let python = crate::runtime::python_bin().expect("a python for the parity oracle");
         let script = r#"
 import json, sys
 from pathlib import Path
@@ -1023,7 +1025,7 @@ json.dump(out, sys.stdout)
         let output = std::process::Command::new(&python)
             .args(["-c", script, root])
             .current_dir(root)
-            .env("PYTHONPATH", crate::db::REPO_INDEX_PKG_PARENT)
+            .env("PYTHONPATH", crate::runtime::pythonpath().expect("the repo_index package"))
             .output()
             .expect("spawn python walk");
         assert!(

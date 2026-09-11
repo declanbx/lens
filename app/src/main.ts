@@ -113,6 +113,35 @@ export interface Project {
   name: string;
   root: string;
 }
+// One row of the project switcher (`list_projects_status`). `Project` only says a folder is
+// REGISTERED; this says whether it is still THERE — which is the whole point of the rebuilt
+// dropdown: until now a folder that had been moved, renamed or unplugged rendered identically to
+// one that works, and the only way to clear it was to hand-edit projects.json.
+export interface ProjectStatus {
+  name: string;
+  root: string; // the registry key — pass THIS to every other project command
+  is_active: boolean;
+  folder_exists: boolean; // the folder itself is on disk right now
+  has_index: boolean; // Lens has a catalogue for it (<root>/_repo_index/INDEX.sqlite)
+  index_bytes: number; // how big that catalogue is; 0 when there is none
+}
+// Reply of `remove_project`. `now_active` is what to DISPLAY afterwards: a root the backend moved
+// us to, or null meaning nothing is registered any more → the first-run screen.
+export interface RemoveReport {
+  removed: string;
+  index_deleted: boolean;
+  bytes_freed: number;
+  now_active: string | null;
+}
+// Reply of `python_status` / `set_python_path`. `path: null` means no interpreter was found, so
+// nothing can be indexed at all — the one failure that makes the app permanently empty.
+// `source` ∈ "env" | "settings" | "probe" | "shell" | "none" — surfaced so the user can see WHICH
+// Python won when several are installed.
+export interface PythonStatus {
+  path: string | null;
+  version: string | null;
+  source: string;
+}
 // Payload of the backend "index-progress" event (mirrors lib.rs::IndexProgress) — one indexer
 // phase line tagged with the project root it belongs to (the overlay filters by `root`).
 interface IndexProgress {
@@ -162,13 +191,25 @@ const api = {
   // Multi-project surface (Phase-2 UI). The backend keeps EXACTLY ONE project resident; switch
   // repoints the single connection. `add_project` only registers (caller indexes + switches).
   listProjects: () => invoke<Project[]>("list_projects"),
-  currentProject: () => invoke<Project>("current_project"),
+  // The switcher's own list: same projects, plus whether each one is still reachable. `list_projects`
+  // stays bound but unused by the menu — it is the flat shape the rest of the surface was frozen on.
+  listProjectsStatus: () => invoke<ProjectStatus[]>("list_projects_status"),
+  // `null` is a REAL answer here, not a failure: no folder is registered (first launch, or the user
+  // just forgot the last one). It drives the first-run screen.
+  currentProject: () => invoke<Project | null>("current_project"),
   addProject: (root: string, name?: string) =>
     invoke<Project>("add_project", { root, name: name ?? null }),
   switchProject: (root: string) => invoke<void>("switch_project", { root }),
-  removeProject: (root: string) => invoke<void>("remove_project", { root }),
+  // Forgetting the ACTIVE folder is allowed now: the backend moves off it first (stopping the
+  // watcher and releasing the writer lock) and reports where it landed in `now_active`.
+  removeProject: (root: string, deleteIndex: boolean) =>
+    invoke<RemoveReport>("remove_project", { root, deleteIndex }),
   // Runs the canonical indexer subprocess for an arbitrary root; emits "index-progress" per phase.
   indexProject: (root: string) => invoke<ReindexReport>("index_project", { root }),
+  // Which Python the indexer will spawn, and how it was found. `path: null` = none, which is the
+  // one condition under which "Add folder…" cannot possibly work.
+  pythonStatus: () => invoke<PythonStatus>("python_status"),
+  setPythonPath: (path: string) => invoke<PythonStatus>("set_python_path", { path }),
 };
 
 // ── Small DOM + format helpers ───────────────────────────────────────────────────────────────
@@ -383,6 +424,9 @@ const refreshBtn = el<HTMLButtonElement>("refresh");
 const modeSeg = el("modeseg");
 const rulerEl = el("ruler");
 const appEl = el("app");
+const welcomeEl = el("welcome"); // the first-run scrim (hidden unless no folder is registered)
+const welcomePickBtn = el<HTMLButtonElement>("welcomepick");
+const welcomePyEl = el("welcomepython"); // the Python notice slot inside the first-run card
 
 // ═════════════════════════════════════════════════════════════════════════════════════════════
 // FOLDER TREE MODEL — fold the flat Row[] into a nested directory model. Files live on leaves;
@@ -655,6 +699,15 @@ function emptyTreeHtml(): string {
     return (
       `<p class="lens-empty">No ${esc(filterWord())} files in this project. ` +
       `<span class="reidx" data-clear="filters">Show all types</span></p>`
+    );
+  }
+  // No project resident at all — the backend is parked on the empty placeholder index. "No entries."
+  // there is a lie by omission: there is no folder to have entries IN. (Normally the first-run
+  // scrim covers this pane; it is still what shows behind a dismissed one.)
+  if (!activeProjectRoot) {
+    return (
+      `<p class="lens-empty">No folder is open yet. ` +
+      `<span class="reidx" data-pick="1">Choose a folder to index</span></p>`
     );
   }
   return `<p class="lens-empty">No entries.</p>`;
@@ -989,6 +1042,13 @@ function setStatusCount(text: string): void {
 function wireListEvents(): void {
   listEl.addEventListener("click", (ev) => {
     const target = ev.target as HTMLElement;
+
+    // The no-folder empty state's one offer. Same escape-hatch idea as [data-clear] below: the
+    // pane says what happened AND carries the click that fixes it.
+    if (target.closest<HTMLElement>("[data-pick]")) {
+      void addFolderFlow();
+      return;
+    }
 
     // The empty-state escape hatch ("Show all types" / "Clear the search") — the click that undoes
     // whatever emptied the pane, so a filtered-to-nothing tree is never a dead end.
@@ -2593,8 +2653,16 @@ function wireTitlebarDrag(): void {
 // GLOBAL KEYBOARD (secondary): '/' focuses the search box; Escape blurs it.
 // ═════════════════════════════════════════════════════════════════════════════════════════════
 
+/// True while a modal card (first run · forget-a-folder · Python-not-found) is up. A modal owns the
+/// keyboard completely: '/' must not yank focus into a search box the user cannot even see, and the
+/// arrows must not walk a tree behind the scrim.
+function modalIsOpen(): boolean {
+  return document.querySelector(".scrim:not([hidden])") !== null;
+}
+
 function wireGlobalKeys(): void {
   document.addEventListener("keydown", (ev) => {
+    if (modalIsOpen()) return;
     if (ev.key === "/" && document.activeElement !== searchEl) {
       ev.preventDefault();
       searchEl.focus();
@@ -2607,6 +2675,7 @@ function wireGlobalKeys(): void {
   document.addEventListener("keydown", (ev) => {
     const NAV = ["ArrowDown", "ArrowUp", "Enter", "ArrowRight", "ArrowLeft"];
     if (!NAV.includes(ev.key)) return;
+    if (modalIsOpen()) return; // a modal card owns the keyboard while it is up
     if (state.mode !== "browse") return; // Health replaces the left pane; there are no rows
     const t = ev.target as HTMLElement | null;
     if (t === searchEl) return; // the search box wires its own subset (↑/↓/⏎ only)
@@ -2670,13 +2739,313 @@ async function teardownAndReload(): Promise<void> {
 }
 
 /// Re-read the active project from the backend and paint its name on the trigger label.
-async function refreshProjectLabel(): Promise<void> {
+///
+/// Three outcomes, and they are NOT interchangeable — which is why this returns a word rather than
+/// a nullable project. `current_project` now answers `null` for "no folder is registered", a real
+/// and expected state (first launch, or the user just forgot their last folder) that must raise the
+/// first-run screen. A thrown error is something else entirely — the backend is unwell — and must
+/// NOT be mistaken for a fresh install, or a user with folders gets told they have none.
+async function refreshProjectLabel(): Promise<"active" | "none" | "error"> {
   try {
     const cur = await api.currentProject();
+    if (cur === null) {
+      activeProjectRoot = "";
+      if (projLabelEl) projLabelEl.textContent = "No folder";
+      return "none";
+    }
     activeProjectRoot = cur.root;
     if (projLabelEl) projLabelEl.textContent = cur.name;
+    return "active";
   } catch (e) {
     console.error("[lens] currentProject failed:", e);
+    return "error";
+  }
+}
+
+// ═════════════════════════════════════════════════════════════════════════════════════════════
+// MODAL CARDS — first run · forget-a-folder · Python-not-found.
+// One shape (.scrim > .mcard.glass-3, lens.css §11) and one set of keyboard rules: Escape cancels,
+// Tab cycles inside the card, and the destructive button is never what focus lands on.
+// ═════════════════════════════════════════════════════════════════════════════════════════════
+
+/// Mount a card on a fresh scrim and hand back a `close()`. Everything shared lives here so the two
+/// dynamic cards cannot drift apart: focus is captured and restored, Escape and a backdrop click
+/// both cancel, and Tab is trapped inside the card (a modal you can Tab out of leaves the keyboard
+/// somewhere the user cannot see).
+function mountModal(card: HTMLElement, onCancel: () => void): () => void {
+  const prevFocus = document.activeElement as HTMLElement | null;
+  const scrim = document.createElement("div");
+  scrim.className = "scrim";
+  scrim.appendChild(card);
+  document.body.appendChild(scrim);
+
+  const close = (): void => {
+    scrim.remove();
+    // Restore focus only if it is still meaningful — the trigger may have been re-rendered away
+    // (the project menu rebuilds its rows), in which case document.body is the honest answer.
+    if (prevFocus && prevFocus.isConnected) prevFocus.focus();
+  };
+  scrim.addEventListener("mousedown", (ev) => {
+    if (ev.target === scrim) onCancel(); // click the wash, not the card ⇒ cancel
+  });
+  card.addEventListener("keydown", (ev) => {
+    if (ev.key === "Escape") {
+      ev.stopPropagation(); // the document-level Escape handlers close menus; this one owns it
+      onCancel();
+      return;
+    }
+    if (ev.key !== "Tab") return;
+    const focusable = [...card.querySelectorAll<HTMLElement>("button, input, [href], [tabindex]")].filter(
+      (n) => !(n as HTMLButtonElement | HTMLInputElement).disabled && n.tabIndex !== -1,
+    );
+    if (focusable.length === 0) return;
+    ev.preventDefault();
+    const at = focusable.indexOf(document.activeElement as HTMLElement);
+    const next = ev.shiftKey ? (at <= 0 ? focusable.length : at) - 1 : (at + 1) % focusable.length;
+    focusable[next].focus();
+  });
+  return close;
+}
+
+// ── The Python notice ────────────────────────────────────────────────────────────────────────
+// Written for someone who has never heard the word "interpreter". It appears in two places from
+// this one builder: inline on the first-run card, and as the body of its own modal when the
+// add-folder flow hits the same wall.
+
+/// Plain words for `PythonStatus.source`, so "which Python won" is answerable without knowing how
+/// the search works. Small print only — never the sentence that carries the message.
+const PY_SOURCE_WORD: Record<string, string> = {
+  env: "chosen by the LENS_PYTHON setting",
+  settings: "the one you picked",
+  probe: "already installed on this Mac",
+  shell: "already installed on this Mac",
+};
+
+function pythonNoticeHtml(st: PythonStatus, withButton: boolean): string {
+  const choose = withButton
+    ? `<div class="pyacts"><button class="btn" data-act="pypick">Choose Python…</button></div>`
+    : "";
+  if (st.path === null) {
+    return (
+      `<div class="pyh"><span class="ic" aria-hidden="true">⚠</span>Lens cannot read folders yet</div>` +
+      `<p>Lens uses a free program called Python to look inside your files. Most Macs used for ` +
+      `research already have one, but Lens could not find it here.</p>` +
+      `<p class="pyfine">Install it from python.org, or point Lens at a copy you already have — ` +
+      `in the file window, ⌘⇧G lets you type a location such as /usr/bin/python3.</p>` +
+      choose
+    );
+  }
+  const how = PY_SOURCE_WORD[st.source] ?? "in use";
+  const ver = st.version ? ` ${esc(st.version)}` : "";
+  return (
+    `<div class="pyh"><span class="ic" aria-hidden="true">✓</span>Python${ver} is ready</div>` +
+    `<p>Lens can read your folders. It is using the copy ${esc(how)}.</p>` +
+    `<p class="pypath">${esc(st.path)}</p>` +
+    choose
+  );
+}
+
+/// Open the file picker, hand the choice to the backend, and report back. Returns the new status,
+/// or null when the user cancelled / the choice was refused (the caller shows the reason).
+async function pickPython(host: HTMLElement): Promise<PythonStatus | null> {
+  let picked: string | string[] | null;
+  try {
+    picked = await open({ directory: false, multiple: false, title: "Choose a Python program" });
+  } catch (e) {
+    console.error("[lens] python picker failed:", e);
+    return null;
+  }
+  if (typeof picked !== "string") return null; // cancelled
+  try {
+    return await api.setPythonPath(picked);
+  } catch (e) {
+    // The backend refuses anything it cannot actually run, and says why in plain words — show that
+    // sentence rather than a generic failure, because it is the one that tells them what to pick.
+    console.error("[lens] set_python_path failed:", e);
+    const err = document.createElement("p");
+    err.className = "pyerr";
+    err.textContent = String(e);
+    host.querySelector(".pyerr")?.remove();
+    host.appendChild(err);
+    return null;
+  }
+}
+
+/// Fill a `.pynotice` slot. Hidden entirely when Python is fine and `alwaysShow` is false — the
+/// first-run screen should be calm, and "your computer is configured correctly" is not news.
+async function paintPythonNotice(host: HTMLElement, alwaysShow = false): Promise<void> {
+  let st: PythonStatus;
+  try {
+    st = await api.pythonStatus();
+  } catch (e) {
+    console.error("[lens] python_status failed:", e);
+    host.hidden = true;
+    return;
+  }
+  if (st.path !== null && !alwaysShow) {
+    host.hidden = true;
+    return;
+  }
+  host.classList.toggle("ok", st.path !== null);
+  host.innerHTML = pythonNoticeHtml(st, st.path === null);
+  host.hidden = false;
+  host.querySelector<HTMLButtonElement>('[data-act="pypick"]')?.addEventListener("click", () => {
+    void pickPython(host).then((next) => {
+      if (next) void paintPythonNotice(host, true); // repaint green so the fix is visibly done
+    });
+  });
+}
+
+/// The add-folder flow's guard. Resolves true when there is a usable Python — either there already
+/// was one, or the user just chose one. False means they backed out, and the caller must stop:
+/// walking them through a folder picker only to fail at indexing is the worst of both.
+async function ensurePythonOrExplain(): Promise<boolean> {
+  let st: PythonStatus;
+  try {
+    st = await api.pythonStatus();
+  } catch (e) {
+    // Can't tell — don't invent a blocker. Let the flow run; if it really is broken, indexing
+    // surfaces its own error.
+    console.error("[lens] python_status failed:", e);
+    return true;
+  }
+  if (st.path !== null) return true;
+
+  return await new Promise<boolean>((resolve) => {
+    const card = document.createElement("div");
+    card.className = "mcard glass-3";
+    card.setAttribute("role", "dialog");
+    card.setAttribute("aria-modal", "true");
+    card.setAttribute("aria-labelledby", "pyh");
+    card.innerHTML =
+      `<h2 class="mtitle" id="pyh">One thing is missing</h2>` +
+      `<div class="pynotice"></div>` +
+      `<div class="macts"><button class="btn" data-act="later">Not now</button></div>`;
+    const notice = card.querySelector<HTMLElement>(".pynotice")!;
+    notice.innerHTML = pythonNoticeHtml(st, true);
+
+    let close = (): void => {};
+    const finish = (ok: boolean): void => {
+      close();
+      resolve(ok);
+    };
+    close = mountModal(card, () => finish(false));
+    // Delegated, not bound per button: a failed pick repaints the notice's innerHTML, which would
+    // throw away a listener attached to the old "Choose Python…" node.
+    card.addEventListener("click", (ev) => {
+      const act = (ev.target as HTMLElement).closest<HTMLElement>("[data-act]")?.dataset.act;
+      if (act === "later") {
+        finish(false);
+      } else if (act === "pypick") {
+        void pickPython(notice).then((next) => {
+          if (!next) return; // cancelled, or refused — pickPython has printed the reason in place
+          if (next.path) finish(true); // fixed — carry straight on into the folder picker
+          else notice.innerHTML = pythonNoticeHtml(next, true);
+        });
+      }
+    });
+    card.querySelector<HTMLButtonElement>('[data-act="later"]')?.focus();
+  });
+}
+
+// ── The first-run screen ─────────────────────────────────────────────────────────────────────
+
+function showWelcome(): void {
+  welcomeEl.hidden = false;
+  void paintPythonNotice(welcomePyEl); // silent when Python is fine
+  welcomePickBtn.focus();
+}
+function hideWelcome(): void {
+  welcomeEl.hidden = true;
+}
+
+// ── "Forget this folder" — the confirm card ──────────────────────────────────────────────────
+
+/// Ask before forgetting `ps`; resolves the user's answer, or null if they backed out.
+/// Deliberately NOT a browser confirm(): the decision needs the folder's real path, its ⚠ state and
+/// the size of what would be deleted on screen at the moment of deciding.
+function confirmForget(ps: ProjectStatus): Promise<{ deleteIndex: boolean } | null> {
+  return new Promise((resolve) => {
+    const card = document.createElement("div");
+    card.className = "mcard glass-3";
+    card.setAttribute("role", "dialog");
+    card.setAttribute("aria-modal", "true");
+    card.setAttribute("aria-labelledby", "forget-h");
+
+    const missing = !ps.folder_exists
+      ? `<div class="mwarn"><span class="ic" aria-hidden="true">⚠</span><span>Lens cannot see this ` +
+        `folder at the moment — it may be on a drive that is not plugged in, or it may have been ` +
+        `moved or renamed.</span></div>`
+      : "";
+    // The checkbox is off by default and disabled with its reason showing when there is nothing to
+    // delete. A disabled control with no stated reason reads as a bug.
+    const why = ps.has_index
+      ? `<span class="why">These are the notes Lens made about the folder, not your files. ` +
+        `Deleting them frees the space; if you add the folder back later Lens reads it again from scratch.</span>`
+      : `<span class="why">There is nothing to delete — Lens has not built a catalogue for this folder.</span>`;
+    const size = ps.index_bytes > 0 ? ` (${fmtBytes(ps.index_bytes)})` : "";
+
+    card.innerHTML =
+      `<h2 class="mtitle" id="forget-h">Forget “${esc(ps.name)}”?</h2>` +
+      `<p class="mbody">Lens will stop listing this folder. Nothing inside it is changed, moved or deleted.</p>` +
+      `<p class="mpath">${esc(ps.root)}</p>` +
+      missing +
+      `<label class="mcheck${ps.has_index ? "" : " is-off"}">` +
+      `<input type="checkbox" data-act="delidx"${ps.has_index ? "" : " disabled"} />` +
+      `<span>Also delete its index files${size}${why}</span></label>` +
+      `<div class="macts">` +
+      `<button class="btn" data-act="cancel">Cancel</button>` +
+      `<button class="btn danger" data-act="forget">Forget</button>` +
+      `</div>`;
+
+    const box = card.querySelector<HTMLInputElement>('[data-act="delidx"]')!;
+    let close = (): void => {};
+    const finish = (answer: { deleteIndex: boolean } | null): void => {
+      close();
+      resolve(answer);
+    };
+    close = mountModal(card, () => finish(null));
+    card.querySelector<HTMLButtonElement>('[data-act="cancel"]')?.addEventListener("click", () => finish(null));
+    card.querySelector<HTMLButtonElement>('[data-act="forget"]')?.addEventListener("click", () =>
+      finish({ deleteIndex: box.checked && ps.has_index }),
+    );
+    // Cancel takes the initial focus, never Forget: a stray Return must not delete anything.
+    card.querySelector<HTMLButtonElement>('[data-act="cancel"]')?.focus();
+  });
+}
+
+/// Confirm, call `remove_project`, then follow `now_active` — the backend has already moved off the
+/// folder (stopping its watcher and releasing its writer lock) if it was the open one, so all the
+/// frontend owes is a repaint of whatever it landed on.
+async function forgetFolderFlow(ps: ProjectStatus): Promise<void> {
+  if (projectBusy) return;
+  const answer = await confirmForget(ps);
+  if (answer === null) return;
+  projectBusy = true;
+  try {
+    const rep = await api.removeProject(ps.root, answer.deleteIndex);
+    if (rep.now_active === null) {
+      // Nothing registered any more. Drop this project's rows before painting the first-run screen —
+      // a forgotten folder's 350–900 MB of in-memory state must not survive its own removal.
+      activeProjectRoot = "";
+      if (projLabelEl) projLabelEl.textContent = "No folder";
+      await teardownAndReload();
+      showWelcome();
+    } else if (rep.now_active !== activeProjectRoot) {
+      // It was the open folder and the backend moved us to another one.
+      await teardownAndReload();
+      await refreshProjectLabel();
+    }
+    const freed =
+      rep.index_deleted && rep.bytes_freed > 0 ? ` · freed ${fmtBytes(rep.bytes_freed)}` : "";
+    // Asking to delete and silently not deleting is worse than not offering: say so.
+    const kept = answer.deleteIndex && !rep.index_deleted ? " · index files could not be deleted" : "";
+    flashStatus(`forgot ${ps.name}${freed}${kept}`);
+  } catch (e) {
+    console.error("[lens] remove_project failed:", e);
+    flashStatus(`could not forget ${ps.name} — see console`);
+  } finally {
+    projectBusy = false;
   }
 }
 
@@ -2752,8 +3121,16 @@ async function indexWithProgress(root: string): Promise<void> {
 
 /// Make `root` active: switch the resident connection (indexing first if it has no index yet), then
 /// teardown + reload + repaint the label. `projectBusy` serialises overlapping requests.
+///
+/// There is deliberately NO "already active, nothing to do" early return. When a project's drive was
+/// unplugged at boot, the registry still NAMES it as the active one while the resident connection is
+/// parked on the empty placeholder index — so re-picking it from the menu after replugging the drive
+/// is exactly the recovery gesture, and that early return made it a dead click, leaving the user
+/// staring at an empty tree the backend already knew how to fix (`switch_project` compares the
+/// resident index PATH as well as the root, so it does the right thing here and a genuinely
+/// redundant re-pick costs one cheap no-op).
 async function activateProject(root: string): Promise<void> {
-  if (projectBusy || root === activeProjectRoot) return;
+  if (projectBusy) return;
   projectBusy = true;
   try {
     try {
@@ -2766,6 +3143,7 @@ async function activateProject(root: string): Promise<void> {
     }
     await teardownAndReload();
     await refreshProjectLabel();
+    hideWelcome(); // a folder is open again; the first-run screen has nothing left to say
     flashStatus(`switched to ${projLabelEl?.textContent ?? "project"}`);
   } catch (e) {
     console.error("[lens] activateProject failed:", e);
@@ -2775,9 +3153,14 @@ async function activateProject(root: string): Promise<void> {
   }
 }
 
-/// "Add folder…": pick a directory, register it, index it (live overlay), then switch to it.
+/// "Add folder…": check Python can run at all, pick a directory, register it, index it (live
+/// overlay), then switch to it.
 async function addFolderFlow(): Promise<void> {
   if (projectBusy) return;
+  // Python first, BEFORE the folder picker. Without an interpreter `index_project` cannot do
+  // anything, and walking someone through choosing a folder only to fail at the indexing step is
+  // the worst possible order to discover that in.
+  if (!(await ensurePythonOrExplain())) return;
   let picked: string | string[] | null;
   try {
     picked = await open({ directory: true, multiple: false, title: "Add a folder to index" });
@@ -2794,6 +3177,7 @@ async function addFolderFlow(): Promise<void> {
     await api.switchProject(root); // now switchable (index exists)
     await teardownAndReload();
     await refreshProjectLabel();
+    hideWelcome(); // first run is over the moment the first folder is in
     flashStatus(`added ${projLabelEl?.textContent ?? "project"}`);
   } catch (e) {
     console.error("[lens] addFolderFlow failed:", e);
@@ -2805,29 +3189,52 @@ async function addFolderFlow(): Promise<void> {
 
 // ── The dropdown menu (reuses the #sortbtn / context-menu glass pattern: .rowmenu.glass-3 of
 //    .menu-item rows, appended to <body>, positioned under the trigger, outside-mousedown/Esc/blur).
+/// The rows as the menu last painted them. The ✕ handler needs the FULL status of the row it was
+/// clicked on (path, ⚠ state, index size) to build an honest confirm card, and re-fetching at click
+/// time would race the very removal it is about to do.
+let projStatuses: ProjectStatus[] = [];
+
 async function buildProjectMenu(): Promise<void> {
   if (!projMenuEl) return;
-  let projects: Project[] = [];
   try {
-    projects = await api.listProjects();
+    projStatuses = await api.listProjectsStatus();
   } catch (e) {
-    console.error("[lens] listProjects failed:", e);
+    console.error("[lens] list_projects_status failed:", e);
+    projStatuses = [];
   }
-  const rows = projects
+  const rows = projStatuses
     .map((p) => {
-      const active = p.root === activeProjectRoot;
+      const active = p.is_active || p.root === activeProjectRoot;
+      // The two state markers are the POINT of this menu. Until now a folder that had been moved,
+      // renamed or left on an unplugged drive rendered exactly like a working one, and the only
+      // clue was that clicking it did nothing useful.
+      let marker = "";
+      if (!p.folder_exists) {
+        marker =
+          `<span class="mk warn" title="Lens cannot see this folder right now — ${esc(p.root)}"` +
+          ` aria-label="not on this Mac right now">⚠</span>`;
+      } else if (!p.has_index) {
+        marker = `<span class="mk" title="Lens has not read this folder yet. Choosing it will read it now.">not indexed yet</span>`;
+      }
       return (
-        `<button class="menu-item" data-proj-root="${esc(p.root)}"${active ? ' style="color:var(--accent)"' : ""}>` +
-        `<span style="width:1em">${active ? "✓" : ""}</span>` +
-        `<span>${esc(p.name)}</span></button>`
+        `<div class="menu-row${p.folder_exists ? "" : " is-missing"}" role="none">` +
+        `<button class="menu-item" role="menuitem" data-proj-root="${esc(p.root)}" title="${esc(p.root)}"` +
+        `${active ? ' style="color:var(--accent)"' : ""}>` +
+        `<span class="tick" aria-hidden="true">${active ? "✓" : ""}</span>` +
+        `<span class="nm">${esc(p.name)}</span>${marker}</button>` +
+        // Sibling of the row button, never nested inside it: a button inside a button is invalid
+        // HTML and the outer one swallows the inner one's clicks.
+        `<button class="menu-x" role="menuitem" data-proj-forget="${esc(p.root)}"` +
+        ` aria-label="Forget ${esc(p.name)}" title="Forget “${esc(p.name)}” — stop listing this folder">✕</button>` +
+        `</div>`
       );
     })
     .join("");
   projMenuEl.innerHTML =
     rows +
     `<div class="menu-sep"></div>` +
-    `<button class="menu-item" data-proj-add="1"><span style="width:1em">＋</span>` +
-    `<span>Add folder…</span></button>`;
+    `<button class="menu-item" role="menuitem" data-proj-add="1"><span class="tick" aria-hidden="true">＋</span>` +
+    `<span class="nm">Add folder…</span></button>`;
 }
 
 async function openProjectMenu(): Promise<void> {
@@ -2856,11 +3263,17 @@ function wireProjectSwitcher(): void {
   projLabelEl = projBtn.querySelector<HTMLElement>("#projlabel");
   modeSeg.before(projBtn); // parentElement is header.bar1; lands after .sb-flex, before #modeseg
 
-  // The menu surface.
+  // The menu surface. #projmenu (lens.css §12) widens it and styles the removable rows; the
+  // .rowmenu.glass-3 material is the same one the right-click menu uses.
   projMenuEl = document.createElement("div");
+  projMenuEl.id = "projmenu";
   projMenuEl.className = "rowmenu hidden glass-3";
   projMenuEl.setAttribute("role", "menu");
   document.body.appendChild(projMenuEl);
+
+  // The first-run screen's primary button runs the same add-folder flow as the menu item — one
+  // path, so the Python guard and the progress overlay can never be wired to only one of them.
+  welcomePickBtn.addEventListener("click", () => void addFolderFlow());
 
   // Trigger toggles the menu (stopPropagation so the outside-click dismiss below skips this click).
   projBtn.addEventListener("click", (ev) => {
@@ -2869,9 +3282,18 @@ function wireProjectSwitcher(): void {
     else closeProjectMenu();
   });
 
-  // Selection — a project row switches; the "Add folder…" row opens the picker.
+  // Selection — ✕ forgets, a project row switches, the "Add folder…" row opens the picker. The ✕
+  // is checked FIRST and is a sibling of the row button, so it can never double-fire a switch.
   projMenuEl.addEventListener("click", (ev) => {
-    const item = (ev.target as HTMLElement).closest<HTMLElement>(".menu-item");
+    const target = ev.target as HTMLElement;
+    const forget = target.closest<HTMLElement>("[data-proj-forget]");
+    if (forget?.dataset.projForget) {
+      closeProjectMenu();
+      const ps = projStatuses.find((p) => p.root === forget.dataset.projForget);
+      if (ps) void forgetFolderFlow(ps);
+      return;
+    }
+    const item = target.closest<HTMLElement>(".menu-item");
     if (!item) return;
     closeProjectMenu();
     if (item.dataset.projAdd) {
@@ -2956,6 +3378,9 @@ async function boot(): Promise<void> {
     "livebtn",
     "livelabel",
     "modeseg",
+    "welcome",
+    "welcomepick",
+    "welcomepython",
   ] as const;
   const missing = ids.filter((id) => document.getElementById(id) === null);
   if (missing.length > 0) {
@@ -2989,7 +3414,11 @@ async function boot(): Promise<void> {
   // Initial control labels.
   sortLabelEl.textContent = SORT_LABEL[state.sort];
   updateRuler();
-  void refreshProjectLabel(); // paint the active project name on the switcher trigger
+
+  // Awaited, unlike before: its answer decides whether this is a first run. `"none"` is the new
+  // representable state — no folder registered — and only that one raises the welcome screen. A
+  // thrown error must NOT, or a user whose backend hiccuped is told they have no folders.
+  if ((await refreshProjectLabel()) === "none") showWelcome();
 
   showInspectorEmpty();
   showPreviewEmpty("Select a file to preview. Images render on the stage; markdown as a document.");

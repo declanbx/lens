@@ -16,7 +16,6 @@ use std::time::Duration;
 use serde::Deserialize;
 use serde_json::value::RawValue;
 
-use crate::db::{PYTHON_BIN_DEFAULT, REPO_INDEX_PKG_PARENT};
 use crate::reconcile::{Extracted, MetaSource};
 
 /// Max paths per subprocess (§6.7): one failure kills at most one chunk, memory stays bounded.
@@ -57,7 +56,7 @@ pub fn extract_batch(
     cfg_flags: &[String],
     paths: &[String],
 ) -> Result<Vec<ExtractResult>, String> {
-    let python = std::env::var("LENS_PYTHON").unwrap_or_else(|_| PYTHON_BIN_DEFAULT.to_string());
+    let python = crate::runtime::python_bin()?;
     run_extract(&python, root, cfg_flags, paths)
 }
 
@@ -78,7 +77,7 @@ fn run_extract(
     let mut child = Command::new(python)
         .args(&args)
         .current_dir(root)
-        .env("PYTHONPATH", REPO_INDEX_PKG_PARENT)
+        .env("PYTHONPATH", crate::runtime::pythonpath_required()?)
         // exFAT-on-macOS lacks proper POSIX locking → HDF5 open would fail without this (§6.9, V-H1).
         .env("HDF5_USE_FILE_LOCKING", "FALSE")
         .stdin(Stdio::piped())
@@ -267,10 +266,14 @@ mod tests {
 
     /// Skip these subprocess tests if the interpreter can't import repo_index (CI without the env).
     fn python_ok() -> bool {
-        let python = std::env::var("LENS_PYTHON").unwrap_or_else(|_| PYTHON_BIN_DEFAULT.to_string());
+        let (Ok(python), Some(pkg_parent)) =
+            (crate::runtime::python_bin(), crate::runtime::pythonpath())
+        else {
+            return false;
+        };
         Command::new(&python)
             .args(["-c", "import repo_index"])
-            .env("PYTHONPATH", REPO_INDEX_PKG_PARENT)
+            .env("PYTHONPATH", pkg_parent)
             .status()
             .map(|s| s.success())
             .unwrap_or(false)

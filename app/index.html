@@ -43,6 +43,11 @@
                         on open/scroll/resize — absolute would ride the scroller away from its button.
            #livebtn  : the live-update switch. .tbtn + .livedot; gains .held and the label counts the
                         withheld watcher flushes ("Held · 3"). State persists in localStorage.
+           MODALS    : the ONLY three full-window surfaces are .scrim > .mcard.glass-3 —
+                        #welcome (below, static), the "forget this folder" confirm card and the
+                        "Lens can't find Python" card (both built by main.ts). Everything else in
+                        this app is a popover or a menu. Keyboard: Escape cancels, Tab cycles
+                        inside the card, and the destructive button is never the initial focus.
          ════════════════════════════════════════════════════════════════════════ -->
     <div id="app" class="shell">
 
@@ -139,6 +144,27 @@
           </span>
         </footer>
 
+      </div>
+
+      <!-- ░░ FIRST RUN — shown when current_project() comes back null: no folder is registered ░░
+           Lives OUTSIDE the scroller and covers the whole window, because with no folder open
+           there is nothing behind it to read — an empty tree under working chrome is exactly the
+           "is it broken?" screen this replaces. main.ts toggles the `hidden` attribute, fills
+           #welcomepython from python_status(), and wires #welcomepick to the add-folder flow. -->
+      <div id="welcome" class="scrim welcome" hidden>
+        <div class="mcard welcome-card glass-3" role="dialog" aria-modal="true" aria-labelledby="welcome-h">
+          <h1 class="welcome-h" id="welcome-h">Lens</h1>
+          <p class="mbody">Lens reads a folder once and builds a searchable catalogue of everything
+             in it — names, sizes, dates and what is inside each file — so you can find your work
+             without opening anything.</p>
+          <div class="macts start">
+            <button class="btn primary" id="welcomepick">Choose a folder to index…</button>
+          </div>
+          <p class="mfine">The first pass over a large folder can take a few minutes. After that
+             Lens keeps up on its own.</p>
+          <!-- filled only when Python is missing (or just after one is chosen) — see main.ts -->
+          <div id="welcomepython" class="pynotice" hidden></div>
+        </div>
       </div>
 
       <!-- ░░ CONTEXT MENU (right-click a row) — overlay, outside the scroller ░░ -->

@@ -1,8 +1,0 @@
-# Redirect the build target dir OFF the exFAT data drive onto the local SSD.
-# The lens app source lives on the exFAT "FieldDrive" volume, and exFAT's lack of
-# real symlink/AppleDouble support makes Tauri's bundler panic on the `._*` sidecar
-# files macOS writes there. Pinning target-dir to a local-SSD path under $HOME
-# (isolated from any other Tauri project's target) is the proven fix (mirrors the
-# lens_spike spike's `.lens_spike_target`).
-[build]
-target-dir = "$HOME/.lens_viewer_target"

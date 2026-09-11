@@ -28,6 +28,7 @@ mod helper;
 mod pathkey;
 mod preview;
 mod reconcile;
+mod runtime;
 mod tree;
 mod watcher;
 mod writer;
@@ -45,7 +46,10 @@ mod ops;
 
 use std::sync::{Arc, Mutex};
 
-use db::{Crosslinks, Db, EntryDetail, Facets, Project, Projects, ReindexReport, Row, SearchResult};
+use db::{
+    Crosslinks, Db, EntryDetail, Facets, Project, ProjectStatus, Projects, ReindexReport,
+    RemoveReport, Row, SearchResult,
+};
 use defer::DeferralRegistry;
 use helper::PyMetaSource;
 use journal::OpLog;
@@ -283,10 +287,44 @@ fn list_projects(projects: State<'_, Projects>) -> Result<Vec<Project>, String> 
     projects.list()
 }
 
-/// `current_project()` → the active project (the one the resident `Db`/`Crosslinks` point at).
+/// `current_project()` → the active project (the one the resident `Db`/`Crosslinks` point at), or
+/// `null` when NO folder is registered — a genuine first run, or the user removed the last one.
+///
+/// This used to be `Result<Project, String>`, which gave the frontend no way to tell "nothing is
+/// open yet" from "something went wrong"; it logged the error and left the switcher label reading
+/// `"…"` forever. `null` is the first-run signal the welcome screen keys on.
 #[tauri::command]
-fn current_project(projects: State<'_, Projects>) -> Result<Project, String> {
-    projects.active_project()
+fn current_project(projects: State<'_, Projects>) -> Option<Project> {
+    projects.active_project_opt()
+}
+
+/// `list_projects_status()` → every registered project WITH its live on-disk state: is it the
+/// active one, is the folder still there, has it been indexed, how big is that index.
+///
+/// `list_projects` (name + root only) stays as it is. It cannot answer the question the switcher
+/// actually has to answer — a folder that was moved, renamed or unplugged rendered identically to
+/// a working one, so the only way to discover a dead row was to pick it and watch it fail.
+/// Never fails: an unreadable entry reports `folder_exists: false, has_index: false, index_bytes: 0`.
+#[tauri::command]
+fn list_projects_status(projects: State<'_, Projects>) -> Vec<ProjectStatus> {
+    projects.status_list()
+}
+
+/// `python_status()` → the interpreter Lens would use to index, the version it reports, and WHICH
+/// rule chose it (`env` / `settings` / `probe` / `shell` / `none`). `path: null` means none was
+/// found and indexing is unavailable until the user picks one.
+#[tauri::command]
+fn python_status() -> runtime::PythonStatus {
+    runtime::status()
+}
+
+/// `set_python_path(path)` → validate `path` by RUNNING it, persist it to the app's `settings.json`
+/// and use it from now on. A path that is not a Python 3.9+ interpreter changes nothing and comes
+/// back as an error written for the person holding the file dialog — a bad pick cannot break a
+/// working configuration, and it does not silently look like it worked either.
+#[tauri::command]
+fn set_python_path(path: String) -> Result<runtime::PythonStatus, String> {
+    runtime::set_python_path(&path)
 }
 
 /// `add_project(root, name?)` → register a new project (validating `root` is a directory) and
@@ -352,7 +390,25 @@ fn switch_project(
     };
 
     let Some(writer) = app.try_state::<WriterState>() else {
-        // Read-only degrade mode (no writer): just repoint the reader + crosslinks.
+        // No writer is managed. Two different situations share this branch:
+        //
+        //  * the app booted with NO project at all (first run, or the last folder was removed), so
+        //    the engine was never built — this is the user's FIRST project and it needs one. Build
+        //    it here, or a fresh install would have no live index until the app was restarted.
+        //  * another Lens instance holds the writer lock (§3.9 read-only degrade) — `build_engine`
+        //    fails again, and we fall through to repointing the reader alone, as before.
+        match build_engine(&app, &root, &index_path) {
+            Ok((writer, oplog)) => {
+                let watcher = spawn_watcher(&app, &root, writer.clone());
+                app.manage::<WriterState>(writer);
+                app.manage::<OpLogState>(Mutex::new(oplog));
+                app.manage::<RegistryState>(Mutex::new(DeferralRegistry::new()));
+                // `WatcherState` is always managed from `.setup()` (as `None` when there was no
+                // project), so it is SET rather than managed — `manage` would be a silent no-op.
+                set_watcher(watcher);
+            }
+            Err(e) => eprintln!("[lens] live-index engine unavailable — read-only mode: {e}"),
+        }
         db.reopen_at(&index_path)?;
         *crosslinks.lock().map_err(|e| format!("crosslinks mutex poisoned: {e}"))? =
             Crosslinks::load(&proj.crosslinks_path());
@@ -405,11 +461,119 @@ fn switch_project(
     Ok(())
 }
 
-/// `remove_project(root)` → deregister a project and persist. Refuses to remove the ACTIVE project
-/// (switch away first) so the resident connection never points at a deregistered root.
+/// `remove_project(root, deleteIndex)` → forget a project, optionally deleting its index files.
+///
+/// The ACTIVE project can now be removed. That used to be a blanket refusal, which left the only
+/// stale-entry cleanup route as hand-editing `projects.json` — but the refusal was guarding
+/// something real, so the guard is here rather than gone: **before** the entry is dropped, the live
+/// engine is moved OFF that root. Otherwise the writer keeps its `.lens-writer.lock` inside the
+/// folder and the watcher keeps flushing into an index the app no longer lists.
+///
+/// In order:
+///   1. if `root` is active, move off it — to the most recently added project that has an index, or
+///      else park on the placeholder (watcher stopped, writer lock released, reader repointed,
+///      `active_root` cleared);
+///   2. drop the registry entry and persist;
+///   3. if `delete_index`, delete `<root>/_repo_index/` under [`db::delete_index_dir`]'s guards.
+///
+/// A failed deletion is NOT fatal to the removal — the entry is gone either way and the report says
+/// `index_deleted: false`. `now_active` tells the caller what to display afterwards: a root, or
+/// `None` for the welcome screen.
 #[tauri::command]
-fn remove_project(projects: State<'_, Projects>, root: String) -> Result<(), String> {
-    projects.remove(&root)
+fn remove_project(
+    app: tauri::AppHandle,
+    db: State<'_, Db>,
+    crosslinks: State<'_, Mutex<Crosslinks>>,
+    projects: State<'_, Projects>,
+    root: String,
+    delete_index: bool,
+) -> Result<RemoveReport, String> {
+    // Validate registration BEFORE tearing anything down: an unregistered root must be a plain
+    // error, not a removal that first moved the engine somewhere else.
+    projects.get(&root)?;
+
+    if projects.active_root() == root {
+        match projects.fallback_after_removing(&root) {
+            // Reuse `switch_project` verbatim rather than re-implementing the swap — it is the one
+            // place that knows the order the writer, watcher, reader, op-journal and crosslinks
+            // have to move in, and a second copy of that order would drift.
+            Some(next) => switch_project(
+                app.clone(),
+                db.clone(),
+                crosslinks.clone(),
+                projects.clone(),
+                next.root.clone(),
+            )?,
+            None => park_on_placeholder(&app, &db, &crosslinks, &projects)?,
+        }
+    }
+
+    projects.remove(&root)?;
+
+    let (index_deleted, bytes_freed) = if delete_index {
+        match db::delete_index_dir(&root) {
+            Ok(bytes) => (true, bytes),
+            Err(e) => {
+                // The folder is already deregistered; failing the whole call here would tell the
+                // user nothing happened when in fact the removal DID.
+                eprintln!("[lens] remove_project: {e}");
+                (false, 0)
+            }
+        }
+    } else {
+        (false, 0)
+    };
+
+    let now_active = Some(projects.active_root()).filter(|r| !r.is_empty());
+    Ok(RemoveReport { removed: root, index_deleted, bytes_freed, now_active })
+}
+
+/// Move the live engine OFF every registered project and onto the empty placeholder index: stop the
+/// watcher (no more writes), release the writer lock by acquiring the placeholder's instead,
+/// repoint the reader, drop the crosslinks, and record that nothing is open.
+///
+/// Called when the active project is removed and nothing reachable is left to switch to. Each step
+/// is best-effort in the sense that a failure is LOGGED and the remaining steps still run — leaving
+/// the watcher alive on a folder the user just forgot is a worse outcome than a stale reader.
+fn park_on_placeholder(
+    app: &tauri::AppHandle,
+    db: &State<'_, Db>,
+    crosslinks: &State<'_, Mutex<Crosslinks>>,
+    projects: &State<'_, Projects>,
+) -> Result<(), String> {
+    // 1. Watcher first — it is the thing actively writing.
+    if let Some(w) = app.try_state::<WatcherState>() {
+        let mut g = w.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(old) = g.take() {
+            old.stop();
+        }
+    }
+    // 2. Then the writer lock, via the placeholder (its parent dir is the placeholder's "root").
+    match placeholder_index_path(app) {
+        Ok(path) => {
+            let placeholder_root = std::path::Path::new(&path)
+                .parent()
+                .and_then(|p| p.parent())
+                .map(|p| p.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            if let Some(writer) = app.try_state::<WriterState>() {
+                if let Err(e) = writer.switch(&placeholder_root, &path) {
+                    eprintln!("[lens] remove_project: could not park the writer: {e}");
+                }
+            }
+            // 3. The reader.
+            if let Err(e) = db.reopen_at(&path) {
+                eprintln!("[lens] remove_project: could not repoint the reader: {e}");
+            }
+        }
+        Err(e) => eprintln!("[lens] remove_project: no placeholder index ({e}) — the reader stays where it is"),
+    }
+    // 4. Lineage belongs to the project that just left.
+    if let Ok(mut cl) = crosslinks.lock() {
+        *cl = Crosslinks::default();
+    }
+    // 5. And record it, so the next boot is a clean "nothing is open" rather than a guess.
+    projects.clear_active()
 }
 
 /// `index_project(root)` → run the canonical indexer subprocess for an ARBITRARY project root
@@ -621,65 +785,112 @@ pub fn run() {
             // Resolve the persistent registry file in Tauri's app config dir
             // (~/Library/Application Support/com.declan.lens/projects.json on macOS). `app_config_dir`
             // only COMPUTES the path; `Projects::load_or_seed` creates the dir on its first write.
-            let config_path = app
-                .path()
-                .app_config_dir()?
-                .join("projects.json")
-                .to_string_lossy()
-                .into_owned();
+            let handle = app.handle().clone();
 
-            // Load the project registry, or seed it on first run with a single default project
-            // pointing at the legacy SCRNA root — so the FIRST boot opens today's project identically
-            // (zero observable change), and later boots reopen whatever was last active.
+            // Locate the BUNDLED Python crawler + the app config dir once, here, because the three
+            // indexer spawn sites take no `AppHandle` (the live reconciler's helper runs on a
+            // watcher thread). See `runtime` — this is what replaced the hardcoded paths that made
+            // the app work on exactly one Mac.
+            runtime::init(&handle);
+
+            // The persistent registry file in Tauri's app config dir
+            // (~/Library/Application Support/com.declan.lens/projects.json on macOS).
+            // `app_config_dir` only COMPUTES the path; the registry creates the dir on its first
+            // write. NOT `?` — nothing below needs a registry FILE to exist, and this hook must not
+            // be able to fail (see the placeholder comment below for what an `Err` here costs).
+            let config_path = match app.path().app_config_dir() {
+                Ok(dir) => dir.join("projects.json").to_string_lossy().into_owned(),
+                Err(e) => {
+                    eprintln!(
+                        "[lens] no app config dir ({e}) — this session's project list cannot be \
+                         saved; the app still opens"
+                    );
+                    String::new()
+                }
+            };
+
+            // Load the project registry. ZERO projects is a legal, expected state (a first run, or
+            // the user removed the last folder): `active` is then `None` and everything below skips
+            // straight to the placeholder index. The `Option`-returning accessor is used here
+            // deliberately — its `Result` sibling's `?` is what bricked the app in Aug 2026.
             let projects = Projects::load_or_seed(config_path);
-            let active = projects.active_project()?;
+            let active: Option<Project> = projects.active_project_opt();
+            if active.is_none() {
+                eprintln!("[lens] no project is open — first run (or the last folder was removed)");
+            }
 
             // ── live-index engine (§4.8): open the WRITER FIRST — it acquires the single-writer lock,
             //    CREATES a missing INDEX.sqlite (cold first run), and migrates v1→v2 — so the reader
             //    pool below always opens an EXISTING v2 file (no cold-start hard-abort, no v1 read).
             //    Then the op-journal (+ crash recovery), then the watcher. Degrade to READ-ONLY mode
             //    (§3.9) if the writer can't open (another live instance holds the lock, disk error);
-            //    the reader pool stays live, just no reconciler.
-            let handle = app.handle().clone();
-            let engine = build_engine(&handle, &active.root, &active.index_path());
+            //    the reader pool stays live, just no reconciler. With no project there is nothing to
+            //    open at all — `switch_project` builds the engine when the first folder is added.
+            let engine = active.as_ref().map(|a| build_engine(&handle, &a.root, &a.index_path()));
 
             // Open the ACTIVE project's index reader POOL (query_only WAL, statement-level read-only).
-            // NEVER `?` HERE. This open depends on a removable volume, and an error propagating out
-            // of `.setup()` is not a graceful failure: Tauri panics, the panic happens inside
-            // `did_finish_launching` (an ObjC callback = a non-unwinding boundary), so it becomes
-            // `abort()` → SIGABRT with NO window ever created. That bricked the app for 3 days in
-            // Aug 2026 — with no UI, there was no way to select a different project. Degrade onto
-            // the empty placeholder index instead; the window opens and the user can recover.
-            let db = match Db::open_at(&active.index_path()) {
-                Ok(db) => db,
-                Err(e) => {
-                    eprintln!(
-                        "[lens] active project \"{}\" is unavailable ({e}) — opening the EMPTY \
-                         placeholder index; plug the volume in and re-pick the project",
-                        active.root
-                    );
-                    Db::open_at(&placeholder_index_path(&handle)?)?
+            // NEVER `?` ANYWHERE IN HERE. This open depends on a removable volume, and an error
+            // propagating out of `.setup()` is not a graceful failure: Tauri panics, the panic
+            // happens inside `did_finish_launching` (an ObjC callback = a non-unwinding boundary),
+            // so it becomes `abort()` → SIGABRT with NO window ever created. That bricked the app
+            // for 3 days in Aug 2026 — with no UI, there was no way to select a different project.
+            //
+            // Three rungs, each a step further from the disk: the project's own index → the empty
+            // placeholder index under the app config dir → an in-memory index. The placeholder is
+            // itself a file and can itself fail (full disk, unwritable config dir), and it used to
+            // be the last `?` in this function; the in-memory rung is what removes it.
+            let db = match active.as_ref().map(|a| Db::open_at(&a.index_path())) {
+                Some(Ok(db)) => db,
+                other => {
+                    if let (Some(Err(e)), Some(a)) = (other, active.as_ref()) {
+                        eprintln!(
+                            "[lens] active project \"{}\" is unavailable ({e}) — opening the EMPTY \
+                             placeholder index; plug the volume in and re-pick the project",
+                            a.root
+                        );
+                    }
+                    match placeholder_index_path(&handle).and_then(|p| Db::open_at(&p)) {
+                        Ok(db) => db,
+                        Err(e) => {
+                            eprintln!(
+                                "[lens] the placeholder index is unavailable ({e}) — running on an \
+                                 EMPTY IN-MEMORY index so a window still opens"
+                            );
+                            // The only remaining `?` in this hook, and it is not reachable through
+                            // any filesystem, volume or permission failure: opening an in-memory
+                            // SQLite fails only when the process cannot allocate at all.
+                            Db::open_in_memory()?
+                        }
+                    }
                 }
             };
 
             // Load the active project's crosslinks adjacency. A missing/garbled file degrades to
             // empty adjacency (lineage just blank), never a startup failure. Managed behind a `Mutex`
             // so a project switch / reindex can swap in the new project's adjacency in place.
-            let crosslinks = Crosslinks::load(&active.crosslinks_path());
+            let crosslinks =
+                active.as_ref().map(|a| Crosslinks::load(&a.crosslinks_path())).unwrap_or_default();
 
             app.manage(db);
             app.manage(Mutex::new(crosslinks));
 
             match engine {
-                Ok((writer, oplog)) => {
-                    let watcher = spawn_watcher(&handle, &active.root, writer.clone());
+                Some(Ok((writer, oplog))) => {
+                    let root = active.as_ref().map(|a| a.root.clone()).unwrap_or_default();
+                    let watcher = spawn_watcher(&handle, &root, writer.clone());
                     app.manage::<WriterState>(writer);
                     app.manage::<OpLogState>(Mutex::new(oplog));
                     app.manage::<RegistryState>(Mutex::new(DeferralRegistry::new()));
                     app.manage::<WatcherState>(Mutex::new(watcher));
                 }
-                Err(e) => {
+                Some(Err(e)) => {
                     eprintln!("[lens] live-index engine unavailable — read-only mode: {e}");
+                    app.manage::<WatcherState>(Mutex::new(None));
+                }
+                // No project ⇒ no engine yet. `WatcherState` is still managed (as `None`) so every
+                // watcher-touching command answers, and so `switch_project` can SET the handle when
+                // the user adds their first folder.
+                None => {
                     app.manage::<WatcherState>(Mutex::new(None));
                 }
             }
@@ -724,11 +935,14 @@ pub fn run() {
             open_file,
             reindex,
             list_projects,
+            list_projects_status,
             current_project,
             add_project,
             switch_project,
             remove_project,
             index_project,
+            python_status,
+            set_python_path,
             list_children,
             count_children,
             force_rescan,

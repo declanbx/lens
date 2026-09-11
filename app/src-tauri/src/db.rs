@@ -30,32 +30,18 @@ use serde_json::Value;
 // Canonical on-disk locations + caps (the app's only data inputs).
 // ───────────────────────────────────────────────────────────────────────────────────────────
 
-/// The DEFAULT seed project root — the parent of `_repo_index/` that the index's repo-relative
-/// POSIX paths are anchored to. Phase-1 multi-project refactor: the app now opens ANY project's
-/// index at runtime (see [`Project`] / [`Projects`]), but on FIRST run — when no `projects.json`
-/// exists yet — it seeds a single project pointing here, so the very first boot is byte-identical
-/// to the old single-project behavior. Every per-project on-disk location now DERIVES from a
-/// project's `root` ([`Project::index_path`] / [`Project::crosslinks_path`]); the legacy
-/// `INDEX_SQLITE` / `CROSSLINKS_JSON` constants are exactly `PROJECT_ROOT/_repo_index/INDEX.sqlite`
-/// and `…/crosslinks.json` (asserted by the `seed_project_reproduces_legacy_paths` test).
-///
-/// Still used at runtime ONLY as the poison-fallback root for `abs_of` resolution and as the
-/// seed-project root — it is no longer the single source of the live index/crosslinks paths.
-pub const PROJECT_ROOT: &str = "/path/to/your/research-folder";
-
-/// The Python interpreter that runs the canonical `repo_index` indexer for the in-app reindex.
-/// A bundled `.app` does NOT inherit the shell PATH, so the indexer is ALWAYS spawned by an
-/// ABSOLUTE interpreter path — never a bare `python3`. This default is this machine's anaconda
-/// interpreter (verified to import `repo_index`); the `LENS_PYTHON` env var overrides it so the
-/// app survives an environment move without a rebuild.
-pub const PYTHON_BIN_DEFAULT: &str = "$HOME/anaconda3/bin/python3";
-
-/// Parent dir of the `repo_index` package, exported as `PYTHONPATH` for the reindex subprocess so
-/// `-m repo_index` resolves even if the package is not pip-installed in the chosen interpreter
-/// (belt-and-suspenders — harmless when it is already installed editable).
-pub const REPO_INDEX_PKG_PARENT: &str =
-    "${LENS_HOME:?set LENS_HOME to your working copy}";
-
+// THERE IS NO DEFAULT PROJECT ROOT, NO DEFAULT INTERPRETER AND NO HARDCODED CRAWLER PATH.
+//
+// Three `const` absolute paths used to live here — a seed project root on one external volume, one
+// user's anaconda python3, and that volume's copy of the `repo_index` package. Every one of them
+// resolved on the machine they were written for and on no other, which is what made the app
+// unusable for anyone else: the window opened, "Add folder…" opened a picker, and indexing then
+// failed spawning an interpreter that did not exist.
+//
+//   * the interpreter and the crawler are now RESOLVED AT RUNTIME — see [`crate::runtime`];
+//   * the seed project is gone entirely: a registry with zero projects is a representable state
+//     (`list = []`, `active_root = ""`), which is what a genuine first run looks like.
+//
 /// Hard ceiling on a single page's row count, regardless of the `limit` the frontend asks for.
 /// Keeps any one IPC payload bounded (memory invariant) even if a caller passes a huge `limit`.
 pub const MAX_PAGE_LIMIT: u32 = 500;
@@ -121,6 +107,39 @@ impl Db {
             pool,
             next: std::sync::atomic::AtomicUsize::new(0),
             index_path: Mutex::new(index_path.to_string()),
+        })
+    }
+
+    /// The floor beneath the placeholder: a pool of EMPTY, v2, IN-MEMORY indexes, touching no disk
+    /// at all.
+    ///
+    /// The placeholder index is already the fallback for "the active project's index will not
+    /// open", but it is itself a file on disk (under the app config dir) and so can itself fail —
+    /// a full disk, a permissions problem, a config dir that cannot be created. That was the LAST
+    /// `?` in `.setup()`, and a `?` there is not an error, it is `abort()` with no window (Tauri
+    /// panics inside `did_finish_launching`, which cannot unwind). This makes the window
+    /// unconditional: every command still resolves `State<Db>`, every query answers "nothing", and
+    /// the user can still reach the folder picker.
+    ///
+    /// Each pool connection is its own private database — they never see each other's writes, which
+    /// is fine precisely because nothing ever writes here.
+    pub fn open_in_memory() -> Result<Db, String> {
+        let mut pool = Vec::with_capacity(READER_POOL_SIZE);
+        for _ in 0..READER_POOL_SIZE {
+            let conn = Connection::open_in_memory()
+                .map_err(|e| format!("in-memory index: {e}"))?;
+            // The v2 schema has to be created here: `ensure_v2_if_writable` works through a
+            // separate transient connection, which for `:memory:` would migrate a DIFFERENT
+            // database and leave this one without tables.
+            crate::tree::migrate_to_v2(&conn)?;
+            conn.execute_batch("PRAGMA query_only=ON;")
+                .map_err(|e| format!("in-memory index: query_only: {e}"))?;
+            pool.push(Mutex::new(conn));
+        }
+        Ok(Db {
+            pool,
+            next: std::sync::atomic::AtomicUsize::new(0),
+            index_path: Mutex::new(String::new()),
         })
     }
 
@@ -251,12 +270,39 @@ impl Project {
     }
 }
 
-/// The DEFAULT seed project used on FIRST run (no `projects.json` yet) — points at [`PROJECT_ROOT`]
-/// so the very first boot is byte-identical to the old single-project behavior. Its derived
-/// `index_path()` / `crosslinks_path()` reproduce the legacy `INDEX_SQLITE` / `CROSSLINKS_JSON`
-/// constants exactly (asserted by `seed_project_reproduces_legacy_paths`).
-pub fn default_seed_project() -> Project {
-    Project { name: basename(PROJECT_ROOT), root: PROJECT_ROOT.to_string() }
+/// One registered project plus everything the UI needs to tell a WORKING row from a broken one.
+/// Registration is not reachability (see [`Project::index_reachable`]) and the switcher used to
+/// render both identically: a folder that had been moved, renamed or unplugged looked exactly like
+/// a folder that was fine, right up until picking it failed.
+///
+/// Deliberately reports rather than fails — an entry whose root is unreadable comes back
+/// `folder_exists: false, has_index: false, index_bytes: 0`, never an error, because one bad row
+/// must not cost the user the whole list.
+#[derive(Serialize, Clone, Debug)]
+pub struct ProjectStatus {
+    pub name: String,
+    /// The registry KEY — this is what every other project command takes.
+    pub root: String,
+    pub is_active: bool,
+    /// The project folder itself is on disk right now.
+    pub folder_exists: bool,
+    /// `<root>/_repo_index/INDEX.sqlite` exists — the same test `switch_project` preconditions on.
+    pub has_index: bool,
+    /// Total size of `<root>/_repo_index/`, 0 when absent — what the "also delete its index files"
+    /// confirmation shows, so the user knows what they are reclaiming before they agree to it.
+    pub index_bytes: u64,
+}
+
+/// What `remove_project` reports back. `now_active` is the whole point: after removing the ACTIVE
+/// project the app has moved somewhere, and the caller must be told WHERE — a root to display, or
+/// `None` for "nothing is open, show the welcome screen".
+#[derive(Serialize, Clone, Debug)]
+pub struct RemoveReport {
+    /// The root that was removed (the key that was passed in), echoed back.
+    pub removed: String,
+    pub index_deleted: bool,
+    pub bytes_freed: u64,
+    pub now_active: Option<String>,
 }
 
 /// On-disk persistence shape for `projects.json` (the registry + the last-active selection). A
@@ -298,11 +344,17 @@ fn write_projects_file(config_path: &str, list: &[Project], active_root: &str) -
 }
 
 impl Projects {
-    /// Load the registry from `config_path`, or seed it on first run. If the file exists and parses
-    /// to a NON-empty list, use it (resolving `active_root` to `last_active` when that root is
-    /// registered AND [reachable](Project::index_reachable), else the first project that is).
-    /// Otherwise seed a single [`default_seed_project`] and write it — so the FIRST boot opens
-    /// today's project identically with zero observable change.
+    /// Load the registry from `config_path`. A missing, empty or garbled file yields a registry
+    /// with NO projects and NO active root — the honest description of a first run.
+    ///
+    /// **This used to seed a project pointing at one specific external volume, and persist it.**
+    /// The zero-project state was not representable (an empty `projects` array was treated as "no
+    /// file" and re-seeded), so a first run on any other Mac wrote a registry whose only entry
+    /// named a volume that would never exist there. `""` is now a legal `active_root`; `.setup()`
+    /// opens the placeholder index and the frontend shows a welcome screen.
+    ///
+    /// When the file DOES list projects, `active_root` resolves to `last_active` if that root is
+    /// registered AND [reachable](Project::index_reachable), else the first project that is.
     ///
     /// **Reachability is checked here because an unreachable selection used to be FATAL.** Opening
     /// the active project's index is the first thing `.setup()` does; its error propagates out of
@@ -315,12 +367,18 @@ impl Projects {
     /// The fallback is deliberately **not persisted** (`needs_write` stays false): `last_active`
     /// keeps naming the absent project, so simply replugging the volume restores it next launch.
     pub fn load_or_seed(config_path: String) -> Self {
+        // NOTE: no `.filter(|f| !f.projects.is_empty())` here any more. That filter made an
+        // empty-but-valid registry indistinguishable from a missing one, which is precisely what
+        // forced the re-seed — the user who removed their last folder got it silently handed back.
         let parsed = std::fs::read_to_string(&config_path)
             .ok()
-            .and_then(|t| serde_json::from_str::<ProjectsFile>(&t).ok())
-            .filter(|f| !f.projects.is_empty());
+            .and_then(|t| serde_json::from_str::<ProjectsFile>(&t).ok());
 
-        let (list, active_root, needs_write) = match parsed {
+        let (list, active_root) = match parsed {
+            Some(f) if f.projects.is_empty() => {
+                // A registry that lists nothing: zero projects, nothing active. Not an error.
+                (Vec::new(), String::new())
+            }
             Some(f) => {
                 let is_registered = f.projects.iter().any(|p| p.root == f.last_active);
                 let last_active_usable =
@@ -352,40 +410,73 @@ impl Projects {
                         f.projects[0].root.clone()
                     }
                 };
-                (f.projects, active, false)
+                (f.projects, active)
             }
-            None => {
-                let seed = default_seed_project();
-                let active = seed.root.clone();
-                (vec![seed], active, true)
-            }
+            // No file at all (or unparseable JSON) — a genuine first run. Nothing is written: the
+            // registry only ever reaches disk as the result of a real user action (add / remove /
+            // switch), so a fresh install leaves no file until the user chooses a folder.
+            None => (Vec::new(), String::new()),
         };
 
-        if needs_write {
-            if let Err(e) = write_projects_file(&config_path, &list, &active_root) {
-                eprintln!("[lens] projects: could not seed {config_path}: {e}");
-            }
-        }
         Projects(Mutex::new(ProjectsState { active_root, list, config_path }))
     }
 
-    /// The active project's root — what `abs_of` resolves stored relative paths against. A poisoned
-    /// mutex degrades to [`PROJECT_ROOT`] (the path action is best-effort, never a hard failure).
+    /// The active project's root — what `abs_of` resolves stored relative paths against. `""` when
+    /// no project is open, and ALSO the degraded answer on a poisoned mutex (it used to be one
+    /// specific machine's volume, which quietly resolved paths against a folder the user had never
+    /// opened). `abs_of` refuses to build a path from an empty root, so the caller fails visibly.
     pub fn active_root(&self) -> String {
-        self.0
-            .lock()
-            .map(|s| s.active_root.clone())
-            .unwrap_or_else(|_| PROJECT_ROOT.to_string())
+        self.0.lock().map(|s| s.active_root.clone()).unwrap_or_default()
     }
 
-    /// The full active [`Project`] record (root + name).
+    /// The full active [`Project`] record (root + name). `Err` when nothing is active — the callers
+    /// that genuinely need a project (the in-app Rebuild) should say so.
     pub fn active_project(&self) -> Result<Project, String> {
         let s = self.0.lock().map_err(|e| format!("projects mutex poisoned: {e}"))?;
+        if s.active_root.is_empty() {
+            return Err("no project is open".to_string());
+        }
         s.list
             .iter()
             .find(|p| p.root == s.active_root)
             .cloned()
             .ok_or_else(|| format!("active project not in registry: {}", s.active_root))
+    }
+
+    /// The active project as an `Option` — "nothing is open" is an ordinary answer, not a failure.
+    ///
+    /// `.setup()` uses THIS one and never `?`s on it. The `Result` sibling's error propagating out
+    /// of the setup hook is what bricked the app for three days in Aug 2026: Tauri turns it into a
+    /// panic inside `did_finish_launching`, an ObjC callback, so it cannot unwind and becomes
+    /// `abort()` — the process died before any window existed, leaving no UI to recover from.
+    pub fn active_project_opt(&self) -> Option<Project> {
+        let s = self.0.lock().ok()?;
+        if s.active_root.is_empty() {
+            return None;
+        }
+        s.list.iter().find(|p| p.root == s.active_root).cloned()
+    }
+
+    /// Every registered project with its live on-disk state, for the switcher. NEVER fails — a
+    /// poisoned mutex yields an empty list rather than an error the UI would have to render.
+    pub fn status_list(&self) -> Vec<ProjectStatus> {
+        let Ok(s) = self.0.lock() else {
+            return Vec::new();
+        };
+        s.list
+            .iter()
+            .map(|p| {
+                let index_dir = format!("{}/_repo_index", p.root);
+                ProjectStatus {
+                    name: p.name.clone(),
+                    root: p.root.clone(),
+                    is_active: p.root == s.active_root,
+                    folder_exists: std::path::Path::new(&p.root).is_dir(),
+                    has_index: p.index_reachable(),
+                    index_bytes: dir_size(std::path::Path::new(&index_dir)),
+                }
+            })
+            .collect()
     }
 
     /// A snapshot of every registered project.
@@ -421,20 +512,46 @@ impl Projects {
         Ok(proj)
     }
 
-    /// Drop a registered project and persist. Refuses to remove the ACTIVE project (that would leave
-    /// the resident connection pointing at a deregistered root) — switch away first.
+    /// Drop a registered project and persist.
+    ///
+    /// **This used to refuse the ACTIVE project outright**, which meant the only way to forget the
+    /// folder you were looking at was to hand-edit `projects.json`. The refusal was guarding a real
+    /// hazard — the live engine would have kept its writer lock and kept flushing into a folder the
+    /// app no longer listed — so the guard did not disappear, it MOVED to the caller: the
+    /// `remove_project` command switches the engine away first (§1.3) and only then calls this.
+    ///
+    /// The one thing handled here is the persisted pointer: if the removed root was still the
+    /// active one, `active_root` is cleared rather than left naming a deregistered project (which
+    /// the next boot would have had to guess its way out of).
     pub fn remove(&self, root: &str) -> Result<(), String> {
         let mut s = self.0.lock().map_err(|e| format!("projects mutex poisoned: {e}"))?;
-        if s.active_root == root {
-            return Err(format!("remove_project: cannot remove the active project: {root}"));
-        }
         let before = s.list.len();
         s.list.retain(|p| p.root != root);
         if s.list.len() == before {
             return Err(format!("remove_project: not registered: {root}"));
         }
+        if s.active_root == root {
+            s.active_root = String::new();
+        }
         write_projects_file(&s.config_path, &s.list, &s.active_root)?;
         Ok(())
+    }
+
+    /// Park the registry on "no project is open" and persist. Used when the active project is
+    /// removed and there is nothing reachable to fall back to — the reader goes to the placeholder
+    /// index, the writer lock is released, and this records that there is nothing to reopen.
+    pub fn clear_active(&self) -> Result<(), String> {
+        let mut s = self.0.lock().map_err(|e| format!("projects mutex poisoned: {e}"))?;
+        s.active_root = String::new();
+        write_projects_file(&s.config_path, &s.list, &s.active_root)
+    }
+
+    /// The registered project to fall back on when the active one is removed: the most recently
+    /// added project (registry order is add order) that is NOT `excluding` and whose index is
+    /// actually there. `None` ⇒ park on the placeholder.
+    pub fn fallback_after_removing(&self, excluding: &str) -> Option<Project> {
+        let s = self.0.lock().ok()?;
+        s.list.iter().rev().find(|p| p.root != excluding && p.index_reachable()).cloned()
     }
 
     /// Commit `root` as the active project and persist `last_active`. Validates the root is
@@ -452,6 +569,86 @@ impl Projects {
         write_projects_file(&s.config_path, &s.list, &s.active_root)?;
         Ok(proj)
     }
+}
+
+/// Total bytes of the files under `dir` (0 if it is absent or unreadable). Uses
+/// `symlink_metadata`, so a symlink is counted as the link it is and NEVER followed — the number
+/// reported to the user must describe the bytes that would actually be freed, and following a link
+/// out of the tree would both inflate it and invite the deletion path to wander.
+fn dir_size(dir: &std::path::Path) -> u64 {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return 0;
+    };
+    let mut total = 0u64;
+    for entry in entries.flatten() {
+        let Ok(meta) = entry.path().symlink_metadata() else {
+            continue;
+        };
+        if meta.is_dir() {
+            total = total.saturating_add(dir_size(&entry.path()));
+        } else {
+            total = total.saturating_add(meta.len());
+        }
+    }
+    total
+}
+
+/// Delete `<root>/_repo_index/` and report the bytes freed.
+///
+/// This is the only code in the app that removes a directory tree the user did not name directly,
+/// so the preconditions are stated in full and checked BEFORE anything is touched. All of them must
+/// hold, or nothing is deleted:
+///
+///   * the path ends in exactly one component, named `_repo_index`;
+///   * its parent is exactly the `root` that was asked for;
+///   * it is a REAL directory — `symlink_metadata`, never followed, so `_repo_index` symlinked to
+///     somewhere else deletes nothing;
+///   * `root` is not `/`, not `$HOME`, and names at least two path components.
+///
+/// The last one is the blunt instrument on purpose: a registry entry that has been corrupted down
+/// to `/` or a bare home directory must not be able to recruit this function.
+pub fn delete_index_dir(root: &str) -> Result<u64, String> {
+    use std::path::{Component, Path};
+
+    let root_path = Path::new(root);
+    if root.is_empty() || !root_path.is_absolute() {
+        return Err(format!("delete index: refusing a non-absolute root: {root}"));
+    }
+    let comps: Vec<_> =
+        root_path.components().filter(|c| matches!(c, Component::Normal(_))).collect();
+    if comps.len() < 2 {
+        return Err(format!(
+            "delete index: refusing a root with fewer than two path components: {root}"
+        ));
+    }
+    if let Ok(home) = std::env::var("HOME") {
+        if !home.is_empty() && root_path == Path::new(&home) {
+            return Err("delete index: refusing to touch the home directory".to_string());
+        }
+    }
+
+    let dir = root_path.join("_repo_index");
+    if dir.file_name().map(|n| n != "_repo_index").unwrap_or(true) {
+        return Err(format!("delete index: not an _repo_index directory: {}", dir.display()));
+    }
+    if dir.parent() != Some(root_path) {
+        return Err(format!("delete index: {} is not directly under {root}", dir.display()));
+    }
+    let meta = std::fs::symlink_metadata(&dir)
+        .map_err(|e| format!("delete index: {} is not readable: {e}", dir.display()))?;
+    if meta.file_type().is_symlink() {
+        return Err(format!("delete index: {} is a symlink — refusing", dir.display()));
+    }
+    if !meta.is_dir() {
+        return Err(format!("delete index: {} is not a directory", dir.display()));
+    }
+
+    // Size FIRST: after `remove_dir_all` there is nothing left to measure, and the number is what
+    // the user is told they reclaimed.
+    let bytes = dir_size(&dir);
+    std::fs::remove_dir_all(&dir)
+        .map_err(|e| format!("delete index: could not remove {}: {e}", dir.display()))?;
+    Ok(bytes)
 }
 
 /// Count `entries` in the index at `index_path` via a TRANSIENT read-only connection that is opened,
@@ -1308,9 +1505,16 @@ pub fn facets(conn: &Connection) -> Result<Facets, String> {
 /// `root` (threaded in by the caller from the managed [`Projects`] state — root-aware so the same
 /// helper serves whichever project is resident). An already-absolute path (`/…`) is returned
 /// unchanged regardless of `root`.
+///
+/// An EMPTY root (no project open, or a poisoned registry mutex) yields an EMPTY string, never
+/// `"/{path}"`. That difference matters: `format!("{root}/{path}")` on an empty root produces a
+/// path rooted at `/` that could name a real file, so a "nothing is open" state would quietly read
+/// or reveal the wrong thing. An empty path fails loudly in every caller instead.
 pub fn abs_of(root: &str, path: &str) -> String {
     if path.starts_with('/') {
         path.to_string()
+    } else if root.is_empty() {
+        String::new()
     } else {
         format!("{root}/{path}")
     }
@@ -1338,6 +1542,9 @@ pub fn encode_path_for_uri(abs: &str) -> String {
 /// (threaded in by the command shim from the managed [`Projects`] state) first.
 pub fn reveal_in_finder(root: &str, path: &str) -> Result<(), String> {
     let abs = abs_of(root, path);
+    if abs.is_empty() {
+        return Err("reveal_in_finder: no project is open".to_string());
+    }
     std::process::Command::new("open")
         .arg("-R")
         .arg(&abs)
@@ -1351,6 +1558,9 @@ pub fn reveal_in_finder(root: &str, path: &str) -> Result<(), String> {
 /// the entry's stored repo-relative path, resolved against the ACTIVE project's `root` first.
 pub fn open_file(root: &str, path: &str) -> Result<(), String> {
     let abs = abs_of(root, path);
+    if abs.is_empty() {
+        return Err("open_file: no project is open".to_string());
+    }
     std::process::Command::new("open")
         .arg(&abs)
         .status()
@@ -1373,9 +1583,10 @@ pub fn open_file(root: &str, path: &str) -> Result<(), String> {
 /// (the indexer's progress is all on STDERR); on a non-zero exit the LAST non-empty stderr line
 /// becomes the error tail.
 ///
-/// The interpreter is resolved to an ABSOLUTE path (`LENS_PYTHON` env override, else
-/// [`PYTHON_BIN_DEFAULT`]) because a bundled `.app` does not inherit the shell PATH. `PYTHONPATH`
-/// points at the package parent as a fallback for a non-installed interpreter.
+/// The interpreter is resolved to an ABSOLUTE path by [`crate::runtime::python_bin`] because a
+/// bundled `.app` does not inherit the shell PATH; `PYTHONPATH` points at the parent of the
+/// BUNDLED `repo_index` package ([`crate::runtime::pythonpath`]) so `-m repo_index` resolves
+/// without the crawler being installed in whichever interpreter won.
 ///
 /// Parameterized over `root` (the project to (re)index) — the `reindex` command passes the ACTIVE
 /// project's root, and `index_project` passes an arbitrary one. The indexer writes
@@ -1384,11 +1595,12 @@ pub fn run_reindex_streamed(root: &str, mut on_line: impl FnMut(&str)) -> Result
     use std::io::{BufRead, BufReader};
     use std::process::Stdio;
 
-    let python = std::env::var("LENS_PYTHON").unwrap_or_else(|_| PYTHON_BIN_DEFAULT.to_string());
+    let python = crate::runtime::python_bin()?;
+    let pkg_parent = crate::runtime::pythonpath_required()?;
     let mut child = std::process::Command::new(&python)
         .args(["-m", "repo_index", "export-sqlite", "--root", root])
         .current_dir(root)
-        .env("PYTHONPATH", REPO_INDEX_PKG_PARENT)
+        .env("PYTHONPATH", &pkg_parent)
         .stdout(Stdio::null()) // phase lines are on STDERR; nothing useful on stdout
         .stderr(Stdio::piped()) // the change vs. run_reindex's `.output()` — stream, don't buffer
         .spawn()
@@ -1435,11 +1647,12 @@ pub fn run_manifest_streamed(
     use std::io::{BufRead, BufReader};
     use std::process::Stdio;
 
-    let python = std::env::var("LENS_PYTHON").unwrap_or_else(|_| PYTHON_BIN_DEFAULT.to_string());
+    let python = crate::runtime::python_bin()?;
+    let pkg_parent = crate::runtime::pythonpath_required()?;
     let mut child = std::process::Command::new(&python)
         .args(["-m", "repo_index", "--root", root, "--out", out_dir])
         .current_dir(root)
-        .env("PYTHONPATH", REPO_INDEX_PKG_PARENT)
+        .env("PYTHONPATH", &pkg_parent)
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .spawn()
@@ -2155,15 +2368,17 @@ mod tests {
         assert_eq!(f.exts.len(), 3);
     }
 
+    /// The root is a parameter, not a constant — the same stored relative path resolves under
+    /// whichever project is resident. (This test used to be written against the hardcoded
+    /// `PROJECT_ROOT`, which is exactly what made it pass on one machine and describe nothing.)
     #[test]
     fn copy_path_kinds() {
-        // copy_path is now root-aware; the seed root (PROJECT_ROOT) is today's SCRNA root, so the
-        // expected `abs` / `file_uri` strings are unchanged from the single-project era.
-        assert_eq!(copy_path(PROJECT_ROOT, "a/b.txt", "rel"), "a/b.txt");
-        assert_eq!(copy_path(PROJECT_ROOT, "a/b.txt", "posix"), "a/b.txt");
-        assert_eq!(copy_path(PROJECT_ROOT, "a/b.txt", "abs"), format!("{PROJECT_ROOT}/a/b.txt"));
-        let uri = copy_path(PROJECT_ROOT, "a/b c.txt", "file_uri");
-        assert!(uri.starts_with("file:///Volumes/Crucial%20X10/"));
+        let root = "/Volumes/Some Drive/a project";
+        assert_eq!(copy_path(root, "a/b.txt", "rel"), "a/b.txt");
+        assert_eq!(copy_path(root, "a/b.txt", "posix"), "a/b.txt");
+        assert_eq!(copy_path(root, "a/b.txt", "abs"), format!("{root}/a/b.txt"));
+        let uri = copy_path(root, "a/b c.txt", "file_uri");
+        assert!(uri.starts_with("file:///Volumes/Some%20Drive/"), "{uri}");
         assert!(uri.ends_with("/a/b%20c.txt"));
         // A DIFFERENT root resolves abs against that root (the per-project plumbing).
         assert_eq!(copy_path("/other/proj", "a/b.txt", "abs"), "/other/proj/a/b.txt");
@@ -2172,10 +2387,24 @@ mod tests {
     #[test]
     fn abs_of_passthrough_for_absolute() {
         // Absolute paths pass through unchanged regardless of root…
-        assert_eq!(abs_of(PROJECT_ROOT, "/already/abs"), "/already/abs");
+        assert_eq!(abs_of("/some/root", "/already/abs"), "/already/abs");
         assert_eq!(abs_of("/whatever/root", "/already/abs"), "/already/abs");
         // …and a relative path is joined under the GIVEN root (root-aware resolution).
         assert_eq!(abs_of("/some/root", "a/b"), "/some/root/a/b");
+    }
+
+    /// With NO project open the resolver must produce nothing, not a path rooted at `/`. A folder
+    /// named `/Users`, `/etc` or `/Applications` really exists, so `""` + `"Users/x"` would name a
+    /// real file the user never asked for — and `open`/`reveal` would happily act on it.
+    #[test]
+    fn abs_of_refuses_to_resolve_against_an_empty_root() {
+        assert_eq!(abs_of("", "a/b.txt"), "");
+        assert_eq!(copy_path("", "a/b.txt", "abs"), "");
+        // An absolute stored path still passes through — it needs no root.
+        assert_eq!(abs_of("", "/already/abs"), "/already/abs");
+        // …and the two commands that would otherwise spawn `open ""` say so instead.
+        assert!(reveal_in_finder("", "a/b.txt").is_err());
+        assert!(open_file("", "a/b.txt").is_err());
     }
 
     #[test]
@@ -2292,14 +2521,189 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// The first-run seed must reproduce the EXACT legacy single-project on-disk paths, so a fresh
-    /// boot opens today's project byte-identically (the behavior-preservation guarantee).
+    // ── zero registered folders is a REPRESENTABLE state ────────────────────────────────────────
+    //
+    // These four replace `seed_project_reproduces_legacy_paths`, which asserted that a first run
+    // seeds one specific external volume's path. That behaviour is what these now forbid: it made
+    // a stranger's first launch register a folder that could never exist on their machine, and it
+    // made "I removed my last folder" impossible to express.
+
+    /// No registry file at all — a genuine first run — is zero projects and nothing active.
     #[test]
-    fn seed_project_reproduces_legacy_paths() {
-        let seed = default_seed_project();
-        assert_eq!(seed.root, PROJECT_ROOT);
-        assert_eq!(seed.index_path(), format!("{PROJECT_ROOT}/_repo_index/INDEX.sqlite"));
-        assert_eq!(seed.crosslinks_path(), format!("{PROJECT_ROOT}/_repo_index/crosslinks.json"));
+    fn load_or_seed_with_no_file_yields_zero_projects() {
+        let dir = proj_scratch("first_run");
+        let cfg = dir.join("projects.json").to_string_lossy().into_owned();
+
+        let projects = Projects::load_or_seed(cfg.clone());
+
+        assert!(projects.list().unwrap().is_empty(), "a first run registers nothing");
+        assert_eq!(projects.active_root(), "", "and opens nothing");
+        assert!(projects.active_project_opt().is_none());
+        assert!(
+            !std::path::Path::new(&cfg).exists(),
+            "a first run must not WRITE a registry either — the file appears when the user acts"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// An empty-but-valid registry is the state left behind by removing the last folder. It must
+    /// survive a restart: re-seeding it was how the old code handed the user back a folder they
+    /// had explicitly forgotten.
+    #[test]
+    fn load_or_seed_does_not_reseed_an_empty_registry() {
+        let dir = proj_scratch("empty_registry");
+        let cfg = write_registry(&dir, &[], "");
+
+        let projects = Projects::load_or_seed(cfg);
+
+        assert!(projects.list().unwrap().is_empty());
+        assert_eq!(projects.active_root(), "");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The ACTIVE project can now be removed (the engine teardown moved to the command, §1.3), and
+    /// removing it must clear the persisted pointer rather than leave `last_active` naming a root
+    /// that is no longer registered.
+    #[test]
+    fn remove_can_drop_the_active_project_and_clears_the_pointer() {
+        let dir = proj_scratch("remove_active");
+        let only = reachable_root(&dir, "only");
+        let cfg = write_registry(&dir, &[&only], &only);
+        let projects = Projects::load_or_seed(cfg.clone());
+        assert_eq!(projects.active_root(), only);
+
+        projects.remove(&only).unwrap();
+
+        assert!(projects.list().unwrap().is_empty());
+        assert_eq!(projects.active_root(), "", "the active pointer goes with the entry");
+        let on_disk: ProjectsFile =
+            serde_json::from_str(&std::fs::read_to_string(&cfg).unwrap()).unwrap();
+        assert!(on_disk.projects.is_empty());
+        assert_eq!(on_disk.last_active, "", "persisted, so the next boot is a clean first run");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The replacement chosen after removing the active project: the most recently ADDED project
+    /// that still has an index. A registered-but-unindexed folder is skipped — switching to it
+    /// would fail `switch_project`'s own precondition.
+    #[test]
+    fn fallback_prefers_the_most_recently_added_indexed_project() {
+        let dir = proj_scratch("fallback");
+        let older = reachable_root(&dir, "older");
+        let newer = reachable_root(&dir, "newer");
+        // Registered, but never indexed — must not be chosen.
+        let unindexed = dir.join("unindexed");
+        std::fs::create_dir_all(&unindexed).unwrap();
+        let unindexed = unindexed.to_string_lossy().into_owned();
+        let cfg = write_registry(&dir, &[&older, &newer, &unindexed], &older);
+        let projects = Projects::load_or_seed(cfg);
+
+        let pick = projects.fallback_after_removing(&older).expect("a reachable fallback");
+        assert_eq!(pick.root, newer, "most recently added, and indexed");
+        assert!(
+            projects.fallback_after_removing(&newer).map(|p| p.root) == Some(older.clone()),
+            "removing the newer one falls back to the older INDEXED one, never the unindexed one"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ── deleting an index: the guards ───────────────────────────────────────────────────────────
+
+    /// The happy path — bytes are summed BEFORE the tree goes, because afterwards there is nothing
+    /// left to measure and that number is what the user is told they reclaimed.
+    #[test]
+    fn delete_index_dir_reports_bytes_and_removes_the_tree() {
+        let dir = proj_scratch("del_ok");
+        let root = dir.join("proj");
+        let idx = root.join("_repo_index");
+        std::fs::create_dir_all(idx.join("sub")).unwrap();
+        std::fs::write(idx.join("INDEX.sqlite"), vec![7u8; 1000]).unwrap();
+        std::fs::write(idx.join("sub").join("crosslinks.json"), vec![7u8; 24]).unwrap();
+
+        let freed = delete_index_dir(&root.to_string_lossy()).unwrap();
+
+        assert_eq!(freed, 1024, "every file under the tree, summed before deletion");
+        assert!(!idx.exists(), "the index dir is gone");
+        assert!(root.exists(), "and the project folder itself is NOT touched");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A SYMLINKED `_repo_index` deletes nothing. `remove_dir_all` through a link would delete the
+    /// link's target — some other directory entirely, chosen by whoever made the link.
+    #[test]
+    fn delete_index_dir_refuses_a_symlink() {
+        let dir = proj_scratch("del_symlink");
+        let root = dir.join("proj");
+        std::fs::create_dir_all(&root).unwrap();
+        let elsewhere = dir.join("real_data");
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        std::fs::write(elsewhere.join("precious.csv"), b"keep me").unwrap();
+        std::os::unix::fs::symlink(&elsewhere, root.join("_repo_index")).unwrap();
+
+        let err = delete_index_dir(&root.to_string_lossy()).unwrap_err();
+
+        assert!(err.contains("symlink"), "{err}");
+        assert!(elsewhere.join("precious.csv").exists(), "the link target is untouched");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Roots that must never recruit the deletion path, whatever a corrupted registry says.
+    #[test]
+    fn delete_index_dir_refuses_dangerous_roots() {
+        assert!(delete_index_dir("/").is_err(), "the filesystem root");
+        assert!(delete_index_dir("/Users").is_err(), "a single-component root");
+        assert!(delete_index_dir("relative/path").is_err(), "not absolute");
+        assert!(delete_index_dir("").is_err(), "no project open");
+        if let Ok(home) = std::env::var("HOME") {
+            assert!(delete_index_dir(&home).is_err(), "the home directory");
+        }
+    }
+
+    /// A project with no index at all reports an error rather than pretending it deleted something
+    /// — the caller turns that into `index_deleted: false` and still completes the removal.
+    #[test]
+    fn delete_index_dir_errors_when_there_is_no_index() {
+        let dir = proj_scratch("del_missing");
+        let root = dir.join("proj");
+        std::fs::create_dir_all(&root).unwrap();
+        assert!(delete_index_dir(&root.to_string_lossy()).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ── the switcher's per-row status ───────────────────────────────────────────────────────────
+
+    /// The whole point of the feature: a row that is broken must be DISTINGUISHABLE from a row that
+    /// is fine. Three rows, three different states, one call.
+    #[test]
+    fn status_list_separates_working_missing_and_unindexed_rows() {
+        let dir = proj_scratch("status");
+        let good = reachable_root(&dir, "good");
+        std::fs::write(
+            std::path::Path::new(&good).join("_repo_index").join("INDEX.sqlite"),
+            vec![0u8; 512],
+        )
+        .unwrap();
+        let unindexed = dir.join("no_index");
+        std::fs::create_dir_all(&unindexed).unwrap();
+        let unindexed = unindexed.to_string_lossy().into_owned();
+        let gone = "/Volumes/Nope Not Mounted".to_string();
+        let cfg = write_registry(&dir, &[&good, &unindexed, &gone], &good);
+
+        let rows = Projects::load_or_seed(cfg).status_list();
+
+        assert_eq!(rows.len(), 3);
+        let g = rows.iter().find(|r| r.root == good).unwrap();
+        assert!(g.is_active && g.folder_exists && g.has_index);
+        assert_eq!(g.index_bytes, 512, "the size of <root>/_repo_index/");
+
+        let u = rows.iter().find(|r| r.root == unindexed).unwrap();
+        assert!(u.folder_exists && !u.has_index && !u.is_active);
+        assert_eq!(u.index_bytes, 0);
+
+        let m = rows.iter().find(|r| r.root == gone).unwrap();
+        assert!(!m.folder_exists && !m.has_index);
+        assert_eq!(m.index_bytes, 0, "an unreachable row reports zeroes, never an error");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     // ───────────────────────────────────────────────────────────────────────────────────────

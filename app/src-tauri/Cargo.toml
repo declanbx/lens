@@ -37,7 +37,7 @@ ammonia = "4"
 tokio = { version = "1", features = ["sync", "macros", "rt"] }
 
 # native folder picker for "Add folder…" (open({ directory: true })). "2" tracks the resident
-# tauri = "2" (resolves to 2.7.1); only the `open` dialog command is used (capability: dialog:default).
+# tauri = "2" (Cargo.lock resolves 2.11.3); only the `open` dialog command is used (capability: dialog:default).
 tauri-plugin-dialog = "2"
 
 # Native file DRAG-OUT (drag a row onto Finder / Inkscape / any app), CrabNebula's drag plugin.

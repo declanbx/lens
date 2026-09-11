@@ -44,6 +44,9 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ],
-    "resources": ["icons/64x64.png"]
+    "resources": {
+      "icons/64x64.png": "icons/64x64.png",
+      "../../indexer/repo_index": "repo_index"
+    }
   }
 }
