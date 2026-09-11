@@ -1,0 +1,263 @@
+/* TODO(fonts): IBM Plex is the locked face but CSP forbids remote fonts —
+   bundle woff2 into src/assets/fonts/ + @font-face here. Falls back to system UI font until then. */
+
+/* ============================================================================
+   Lens — Liquid-Glass Dark Semantic Finder · FOUNDATION (base.css)
+   ----------------------------------------------------------------------------
+   The single source of truth for every preview card. Tokens + glass material +
+   the locked 12-colour semantic palette + density + the shared primitives.
+   Cards link this and compose components from it — never re-derive a token.
+
+   Design law:  GLASS IS THE FRAME, NOT THE CONTENT.
+   Chrome (bars, panels, menus, overlays) = translucent liquid glass over a
+   faintly luminous deep canvas. Data surfaces (tree rows, inspector text) sit
+   on a crisp near-opaque substrate so 22px density + scannability survive.
+   ========================================================================== */
+
+:root {
+  /* ---- Canvas (deep, faintly luminous so glass has light to refract) ---- */
+  --canvas-0:#090c12;     /* deepest */
+  --canvas-1:#0b0e14;
+  --canvas-2:#0d1117;     /* base (GitHub-dark lineage, preserved) */
+
+  /* ---- Liquid-glass material — dark-tinted frost, 3 elevations ---------- */
+  /* Tint is dark (legibility on a dark UI); vibrancy comes from saturate().  */
+  /* Real glass = a flat translucent fill + a strong backdrop blur that REFRACTS
+     whatever scrolls beneath it. NO sheen, NO specular edge — the only visual
+     interest is the distortion of the content behind (figpolish restraint).   */
+  --glass-1:rgba(16,20,27,0.26);    /* chrome bars (files scroll under them)    */
+  --glass-2:rgba(20,25,33,0.44);    /* standing panels / sticky hero            */
+  --glass-3:rgba(22,28,38,0.28);    /* floating: menus / popovers / toast       */
+  /* moderate blur keeps the refracted rails recognisably COLOURED (not washed);
+     high saturation makes the bleed vivid through the transparent fill.        */
+  --glass-blur:saturate(190%) blur(24px);
+  --glass-blur-strong:saturate(190%) blur(38px);
+  --glass-border:rgba(255,255,255,0.08);
+  --glass-border-strong:rgba(255,255,255,0.12);
+  /* deprecated decorative tokens — neutralised to no-ops so any older ref
+     renders FLAT (no fake frosting anywhere). */
+  --glass-sheen:linear-gradient(rgba(255,255,255,0), rgba(255,255,255,0));
+  --glass-edge:0 0 0 0 rgba(0,0,0,0);
+  --lift-1:0 1px 2px rgba(0,0,0,0.40);
+  --lift-2:0 10px 32px rgba(0,0,0,0.46);
+  --lift-3:0 18px 54px rgba(0,0,0,0.58);
+
+  /* ---- Data substrate (NO blur behind text — crisp + dense) ------------- */
+  --substrate:rgba(13,17,23,0.78);  /* tree / card content backing           */
+  --substrate-solid:#0e1219;
+
+  /* ---- Ink ------------------------------------------------------------- */
+  /* --faint raised to clear WCAG AA (~4.6:1) for load-bearing 10-11px text.  */
+  --fg:#e9eef5; --fg-2:#c5cfda; --muted:#8b98a5; --faint:#7c8896;
+  --on-accent:#06101f;
+
+  /* ---- Lines ----------------------------------------------------------- */
+  --line:rgba(255,255,255,0.07);
+  --line-2:rgba(255,255,255,0.12);
+  --hairline:inset 0 1px 0 rgba(255,255,255,0.06);
+
+  /* ---- Interactive accent = Claude orange (clay) ----------------------- */
+  /* Reserved for INTERACTION only (focus, keyboard cursor, sort-active,     */
+  /* umap, nav-chip, recency<7d) so it stays out of the way of the warm      */
+  /* CATEGORY hues (config #ffa657, notebook #f0883e, figure #ff7b72).       */
+  --accent:#d97757; --accent-bright:#ec9a78; --accent-ink:#1e0f07;
+  --accent-soft:rgba(217,119,87,0.18);
+  --focus-ring:0 0 0 3px rgba(217,119,87,0.42);
+  --brand-grad:linear-gradient(145deg,#e8956a,#d2664f);
+
+  /* ---- Search hit — the 13th reserved colour, owned by NO category ------ */
+  /* Pink sits off the warm-gold axis so a hit can't be misread as model/    */
+  /* config/warn. Rendered as tinted-bg + bright-text (light-on-dark).       */
+  --hit:#ff8ac7; --hit-bg:rgba(255,138,199,0.16);
+
+  /* ---- Status ---------------------------------------------------------- */
+  --ok:#3fb950; --warn:#e3a008; --err:#f85149;
+
+  /* ====  THE LOCKED SEMANTIC PALETTE — colour == meaning  ==============
+     Exact learned hexes preserved (figure = coral-red, h5ad = violet, …).
+     These ARE the wayfinding system: rails, glyphs, chips, pills, rules. */
+  --c-code:#79c0ff;          /* ❴  py, js, R, sh                           */
+  --c-data_matrix:#d2a8ff;   /* ▦  h5ad, h5, npy, npz, loom                 */
+  --c-data_table:#7ee787;    /* ▤  csv, tsv, parquet, xlsx                  */
+  --c-config:#ffa657;        /* ⚙  yaml, toml, json, ini                    */
+  --c-doc:#a5d6ff;           /* ¶  md, txt, rst                            */
+  --c-notebook:#f0883e;      /* ◆  ipynb                                   */
+  --c-figure:#ff7b72;        /* ◑  png, svg, jpg, jpeg                     */
+  --c-figure_pdf:#d29922;    /* ⬚  pdf                                     */
+  --c-model:#e3b341;         /* ⬡  rds, pt, pkl, joblib                    */
+  --c-log:#9aa5b1;           /* ≣  log, out, err                          */
+  --c-archive:#bc8cff;       /* ▢  zip, gz, tar                           */
+  --c-other:#6e7681;         /* ·  everything else                        */
+
+  /* ---- Type ------------------------------------------------------------ */
+  /* IBM Plex family — Sans for UI + filenames, Mono for numbers/paths (paired) */
+  --font-ui:"IBM Plex Sans", -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+  --font-mono:"IBM Plex Mono", "SF Mono", ui-monospace, Menlo, Consolas, monospace;
+  --fs-hero:16px; --fs-lg:13.5px; --fs-md:13px; --fs-sm:12px;
+  --fs-xs:11px; --fs-2xs:10px;
+  --fw-reg:450; --fw-med:550; --fw-bold:650;
+  --tracking-label:0.06em;
+
+  /* ---- Spacing / radius ------------------------------------------------ */
+  --sp-1:2px; --sp-2:4px; --sp-3:6px; --sp-4:8px; --sp-5:12px; --sp-6:16px; --sp-7:24px;
+  --r-sm:6px; --r-md:9px; --r-lg:12px; --r-xl:16px; --r-pill:999px;
+
+  /* ---- Density (compact default — 38k files) --------------------------- */
+  --row-h:22px; --row-py:2px;
+
+  /* ---- Motion (Apple-restrained) -------------------------------------- */
+  --ease:cubic-bezier(.2,.65,.2,1);
+  --ease-out:cubic-bezier(.16,1,.3,1);
+  --dur:140ms; --dur-2:220ms;
+}
+:root[data-density="comfortable"]{ --row-h:28px; --row-py:5px; }
+
+/* ============================ RESET / CANVAS ============================ */
+*{ box-sizing:border-box; }
+html,body{ margin:0; min-height:100%; }
+body{
+  font-family:var(--font-ui);
+  color:var(--fg);
+  font-size:var(--fs-md);
+  line-height:1.45;
+  -webkit-font-smoothing:antialiased;
+  text-rendering:optimizeLegibility;
+  background:
+    radial-gradient(1100px 640px at 16% -10%, rgba(88,166,255,0.10), transparent 60%),
+    radial-gradient(980px 760px at 108% 4%,  rgba(188,140,255,0.085), transparent 56%),
+    radial-gradient(820px 640px at 46% 122%, rgba(126,231,135,0.05), transparent 60%),
+    linear-gradient(180deg, var(--canvas-1), var(--canvas-2) 42%, var(--canvas-0));
+  background-attachment:fixed;
+}
+.mono{ font-family:var(--font-mono); font-variant-numeric:tabular-nums; }
+::selection{ background:rgba(88,166,255,0.30); }
+
+/* scrollbars — thin, Apple-quiet */
+*::-webkit-scrollbar{ width:10px; height:10px; }
+*::-webkit-scrollbar-thumb{ background:rgba(255,255,255,0.12); border-radius:var(--r-pill);
+  border:2px solid transparent; background-clip:padding-box; }
+*::-webkit-scrollbar-thumb:hover{ background:rgba(255,255,255,0.22); background-clip:padding-box; }
+*::-webkit-scrollbar-corner{ background:transparent; }
+
+/* ============================ GLASS MATERIAL ============================ */
+.glass{
+  background:var(--glass-sheen), var(--glass-1);
+  backdrop-filter:var(--glass-blur); -webkit-backdrop-filter:var(--glass-blur);
+  border:1px solid var(--glass-border);
+  box-shadow:var(--glass-edge), var(--lift-1);
+}
+.glass-2{
+  background:var(--glass-sheen), var(--glass-2);
+  backdrop-filter:var(--glass-blur); -webkit-backdrop-filter:var(--glass-blur);
+  border:1px solid var(--glass-border);
+  box-shadow:var(--glass-edge), var(--lift-2);
+}
+.glass-3{
+  background:var(--glass-sheen), var(--glass-3);
+  backdrop-filter:var(--glass-blur-strong); -webkit-backdrop-filter:var(--glass-blur-strong);
+  border:1px solid var(--glass-border-strong);
+  border-radius:var(--r-lg);
+  box-shadow:var(--glass-edge), var(--lift-3);
+}
+/* CSP/engine fallback: if backdrop-filter is unavailable, glass goes solid (never see-through-to-nothing). WKWebView supports it; this is just safety. */
+@supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+  .glass{ background:#10141b; } .glass-2{ background:#141922; } .glass-3{ background:#171d27; }
+}
+
+/* ============================ PRIMITIVES =============================== */
+
+/* category glyph + the signature left colour-rail (the fast-scan mark) */
+.glyph{
+  display:inline-flex; align-items:center; justify-content:center;
+  font-family:var(--font-mono); font-size:var(--fs-sm); line-height:1;
+  color:var(--cc, var(--c-other));
+}
+.rail{ /* generic colour bar (foundation swatch). Tree rail is defined per-row. */
+  width:3px; align-self:stretch; border-radius:var(--r-pill);
+  background:var(--cc, var(--c-other));
+}
+
+/* icon button (chrome) */
+.iconbtn{
+  display:inline-flex; align-items:center; justify-content:center;
+  width:26px; height:24px; border-radius:var(--r-sm);
+  background:rgba(255,255,255,0.04); color:var(--fg-2);
+  border:1px solid var(--line); cursor:pointer; font-size:var(--fs-md);
+  transition:border-color var(--dur) var(--ease), background var(--dur) var(--ease), color var(--dur) var(--ease);
+}
+.iconbtn:hover{ border-color:var(--line-2); background:rgba(255,255,255,0.08); color:var(--fg); }
+.iconbtn.on{ color:var(--accent); border-color:rgba(88,166,255,0.45); background:var(--accent-soft); }
+
+/* segmented control */
+.seg{ display:inline-flex; padding:2px; gap:2px; border-radius:var(--r-md);
+  background:rgba(0,0,0,0.28); border:1px solid var(--line); box-shadow:var(--hairline); }
+.seg button{ appearance:none; border:0; background:transparent; cursor:pointer;
+  color:var(--muted); font:inherit; font-size:var(--fs-xs); font-weight:var(--fw-med);
+  padding:3px 11px; border-radius:var(--r-sm); transition:all var(--dur) var(--ease); }
+.seg button:hover{ color:var(--fg-2); }
+.seg button.active{ color:var(--fg); background:var(--glass-sheen), rgba(255,255,255,0.10);
+  box-shadow:var(--glass-edge), 0 1px 2px rgba(0,0,0,0.4); }
+
+/* pill (key-matrix strip, head sha, stats) */
+.pill{ display:inline-flex; align-items:center; gap:var(--sp-2);
+  height:20px; padding:0 9px; border-radius:var(--r-pill);
+  background:rgba(255,255,255,0.05); border:1px solid var(--line);
+  font-family:var(--font-mono); font-size:var(--fs-xs); color:var(--fg-2);
+  cursor:pointer; white-space:nowrap;
+  transition:border-color var(--dur) var(--ease), background var(--dur) var(--ease); }
+.pill:hover{ border-color:var(--line-2); background:rgba(255,255,255,0.09); }
+.pill .dim{ color:var(--muted); }
+
+/* metadata chip (obs columns, obsm, structure, contents) */
+.chip{ display:inline-flex; align-items:center; gap:5px;
+  padding:2px 8px; border-radius:var(--r-md);
+  background:rgba(255,255,255,0.045); border:1px solid var(--line);
+  font-family:var(--font-mono); font-size:var(--fs-xs); color:var(--fg-2);
+  cursor:pointer; transition:all var(--dur) var(--ease); }
+.chip:hover{ border-color:var(--line-2); background:rgba(255,255,255,0.09); color:var(--fg); }
+.chip .shp{ color:var(--faint); }
+.chip.hit{ color:var(--hit); background:var(--hit-bg);
+  border-color:color-mix(in srgb, var(--hit) 55%, transparent); font-weight:var(--fw-med); }
+.chip.umap{ color:var(--accent); border-color:rgba(88,166,255,0.45); background:var(--accent-soft); }
+
+/* filter chip (category, with on/off + colour border when active) */
+.filterchip{ display:inline-flex; align-items:center; gap:5px;
+  padding:2px 9px 2px 7px; border-radius:var(--r-pill);
+  background:rgba(255,255,255,0.04); border:1px solid var(--line);
+  font-size:var(--fs-xs); color:var(--fg-2); cursor:pointer; user-select:none;
+  transition:all var(--dur) var(--ease); }
+.filterchip .g{ font-family:var(--font-mono); color:var(--cc); }
+.filterchip .cnt{ color:var(--muted); font-variant-numeric:tabular-nums; font-size:var(--fs-2xs); }
+.filterchip.on{ border-color:var(--cc); background:color-mix(in srgb, var(--cc) 12%, transparent); }
+.filterchip.on .lbl{ color:var(--fg); }
+/* off = legible, clickable (invites re-enabling) — not ghosted */
+.filterchip.off{ color:var(--muted); }
+.filterchip.off .g{ color:var(--faint); }
+.filterchip.off .cnt{ color:var(--faint); }
+.filterchip:hover{ border-color:var(--line-2); }
+.filterchip.on:hover{ border-color:var(--cc); }
+
+/* keyboard hint */
+.kbd{ display:inline-flex; align-items:center; justify-content:center; min-width:16px;
+  height:16px; padding:0 4px; border-radius:5px; font-family:var(--font-mono);
+  font-size:var(--fs-2xs); color:var(--muted);
+  background:rgba(255,255,255,0.06); border:1px solid var(--line);
+  box-shadow:0 1px 0 rgba(0,0,0,0.4); }
+
+/* small section label */
+.sechdr{ font-size:var(--fs-2xs); font-weight:var(--fw-bold); letter-spacing:var(--tracking-label);
+  text-transform:uppercase; color:var(--muted); }
+
+/* inline count badge (collapsible section headers, group headers) */
+.cbadge{ display:inline-flex; align-items:center; font-family:var(--font-mono);
+  font-size:var(--fs-2xs); color:var(--muted); background:rgba(255,255,255,0.06);
+  border:1px solid var(--line); border-radius:var(--r-pill); padding:0 6px; margin-left:6px;
+  font-weight:var(--fw-reg); letter-spacing:0; }
+
+/* a colour rule (inspector hero underline, category divider) */
+.colorrule{ height:2px; border-radius:var(--r-pill); background:var(--cc, var(--accent));
+  box-shadow:0 0 10px -2px var(--cc, var(--accent)); }
+
+/* status text */
+.status{ font-family:var(--font-mono); font-size:var(--fs-xs); color:var(--muted); }
+.status.ok{ color:var(--ok); } .status.warn{ color:var(--warn); } .status.err{ color:var(--err); }

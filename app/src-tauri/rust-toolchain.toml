@@ -1,0 +1,7 @@
+# Pinned for the lens project ONLY (this crate is standalone — no parent workspace).
+# libsqlite3-sys 0.38.x bundles SQLite 3.53.2 (past the WAL-reset corruption bug, §3.0) but its
+# build script uses core::cfg_select, stabilized after Rust 1.94. 1.96.1 is the minimum stable
+# that compiles it. The machine's global default toolchain is unchanged for other projects.
+[toolchain]
+channel = "1.96.1"
+profile = "minimal"

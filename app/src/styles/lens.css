@@ -1,0 +1,1052 @@
+/* ============================================================================
+   Lens — lens.css  ·  COMPONENT + LAYOUT LAYER
+   ----------------------------------------------------------------------------
+   Composes the real finder from base.css TOKENS (never redefines one) and
+   matches the LOCKED liquid-glass design (board / tree / inspector / preview /
+   overlays / health cards in _design_staging) onto the FROZEN DOM contract in
+   index.html.
+
+   Design law (from base.css): GLASS IS THE FRAME, NOT THE CONTENT.
+   - Chrome (bar1, .lefthead, statusbar, popovers, menus) = translucent liquid
+     glass; the file rows scroll UNDER the sticky .lefthead and REFRACT through
+     its backdrop blur (the signature effect).
+   - Data surfaces (#list rows, inspector body, health tables) sit on a crisp
+     near-opaque substrate so 22px density survives.
+   - Selection = frost-luminance / category tint + a brighter, wider rail.
+     NEVER a coral fill.
+   - -webkit-backdrop-filter is written FIRST, then backdrop-filter; the
+     @supports solid fallback already lives in base.css.
+   ============================================================================ */
+
+/* ════════════════════════════════════════════════════════════════════════
+   0 · SHELL — THE SINGLE-SCROLLER PATTERN (the crux).
+   #app.shell is a fixed full-viewport frame; .scroll is the ONE scroll
+   container. bar1, .lefthead, the inspector and the statusbar are all
+   position:sticky INSIDE .scroll — so the file rows scroll UNDER bar1
+   (top:0, full width) AND .lefthead (top:48) and refract through their
+   backdrop blur. Verified rule: backdrop-filter refracts SCROLLED content
+   only when the glass is sticky inside the scroll container.
+   Transparent so macOS vibrancy shows through the deep canvas + chrome glass.
+   ════════════════════════════════════════════════════════════════════════ */
+.shell{
+  position:relative;
+  height:100vh;
+  width:100vw;
+  overflow:hidden;
+  background:transparent;
+}
+.scroll{
+  position:absolute; inset:0;
+  overflow-y:auto; overflow-x:hidden;
+  background:transparent;
+}
+
+/* util */
+.hidden{ display:none !important; }
+
+/* ════════════════════════════════════════════════════════════════════════
+   1 · BAR 1 — FULL-WIDTH top glass, sticky top:0 inside .scroll.
+   search on the LEFT · Browse/Health seg on the RIGHT. File rows scroll
+   under it across the whole width and refract through the blur (.glass in
+   base.css supplies the bg + -webkit-backdrop-filter FIRST + @supports).
+   ════════════════════════════════════════════════════════════════════════ */
+.bar1{
+  position:sticky; top:0; z-index:40;
+  height:48px;
+  display:flex; align-items:center; gap:var(--sp-5);
+  /* Left inset must clear BOTH the macOS traffic-lights (~70px) AND the native
+     window title "Lens" that sits to their right (~50px). Tune --titlebar-inset
+     to the exact title width if needed. */
+  --titlebar-inset:140px;
+  padding:0 var(--sp-5) 0 var(--titlebar-inset);
+  /* seamless: no bottom seam — bar1 glass flows straight into the controls/ruler band */
+  border:0;
+  border-radius:0;
+}
+/* spacer that pushes the view seg to the far right */
+.bar1 .sb-flex{ flex:1 1 auto; }
+.bar1 .seg{ flex:0 0 auto; }
+
+/* brand + the frosted orange lens orb (board.html .mk — radial highlight +
+   inner ring; NOT a 4-box). */
+.brand{
+  display:inline-flex; align-items:center; gap:var(--sp-3);
+  font-weight:var(--fw-bold); letter-spacing:-0.01em;
+  color:var(--fg); font-size:15px; flex:0 0 auto; user-select:none;
+}
+.brand .mk{
+  width:23px; height:23px; border-radius:50%; position:relative; flex:0 0 auto;
+  background:
+    radial-gradient(circle at 34% 27%, rgba(255,255,255,0.9), rgba(255,255,255,0.04) 48%),
+    var(--brand-grad);
+  box-shadow:
+    inset 0 1px 1px rgba(255,255,255,0.6),
+    inset 0 0 0 1px rgba(255,255,255,0.18),
+    inset 0 -3px 5px rgba(0,0,0,0.28),
+    0 2px 9px rgba(210,102,79,0.5);
+}
+.brand .mk::after{
+  content:""; position:absolute; inset:5.5px; border-radius:50%;
+  border:1px solid rgba(255,255,255,0.30);
+  box-shadow:inset 0 0 4px rgba(255,255,255,0.25);
+}
+
+/* the Browse / Health segmented control — .seg primitive is in base.css.
+   #modeseg sits at the far right and just needs to not grow. */
+#modeseg{ flex:0 0 auto; }
+
+/* search — recessed dark field with a leading glyph, anchored LEFT in bar1 */
+.searchwrap{
+  flex:0 1 560px; position:relative;
+  display:flex; align-items:center;
+}
+.searchwrap .lead{
+  position:absolute; left:12px; color:var(--muted); font-size:14px;
+  pointer-events:none;
+}
+.search{
+  width:100%; height:30px; border-radius:var(--r-md);
+  padding:0 12px 0 33px;
+  background:rgba(0,0,0,0.40);
+  border:1px solid var(--line);
+  color:var(--fg); font:inherit; font-size:var(--fs-md);
+  outline:none;
+  transition:border-color var(--dur) var(--ease), box-shadow var(--dur) var(--ease);
+}
+.search::placeholder{ color:var(--faint); }
+.search::-webkit-search-cancel-button{ -webkit-appearance:none; }
+.search:focus{ border-color:var(--accent); box-shadow:var(--focus-ring); }
+
+/* ── "figure text" opt-in ────────────────────────────────────────────────
+   Sits beside the search box, not in the Types popover: it changes what the
+   query MEANS, so it belongs where the query is typed. Reads as off-duty
+   chrome until checked, then takes the accent like every other active
+   affordance (.tbtn.on, .filterchip.on) so "a search is widened" is visible
+   at a glance rather than something the user has to remember. */
+.figtoggle{
+  display:inline-flex; align-items:center; gap:6px;
+  margin-left:10px; padding:0 9px; height:30px;
+  border:1px solid var(--line); border-radius:var(--r-md);
+  color:var(--muted); font-size:var(--fs-xs); white-space:nowrap;
+  cursor:pointer; user-select:none;
+  transition:color var(--dur) var(--ease), border-color var(--dur) var(--ease),
+             background var(--dur) var(--ease);
+}
+.figtoggle:hover{ color:var(--fg); border-color:var(--line-2); }
+.figtoggle:has(input:checked){
+  color:var(--accent); border-color:rgba(217,119,87,0.45); background:var(--accent-soft);
+}
+.figtoggle input{ accent-color:var(--accent); margin:0; cursor:pointer; }
+.figtoggle:focus-within{ box-shadow:var(--focus-ring); }
+
+/* Match provenance on a band row: this figure matched on text rendered INSIDE it, which the row
+   itself cannot show. Without the badge the hit looks arbitrary. */
+.figbadge{
+  flex:0 0 auto; margin-left:8px; padding:0 6px;
+  border:1px solid rgba(217,119,87,0.40); border-radius:var(--r-sm, 4px);
+  background:var(--accent-soft); color:var(--accent);
+  font-size:var(--fs-2xs); letter-spacing:.03em; line-height:16px;
+  text-transform:lowercase; white-space:nowrap; pointer-events:none;
+}
+/* .iconbtn primitive lives in base.css (refresh now lives in .controls, far right) */
+/* the ⟳ refresh GLYPH spins (in accent) while a reindex subprocess runs; disabled = dimmed.
+   Only the inner .gly rotates (inline-block so transforms apply) — the button box stays put. */
+@keyframes lens-spin { to { transform: rotate(360deg); } }
+.iconbtn .gly{ display:inline-block; }
+.iconbtn.spinning{ color:var(--accent); }
+.iconbtn.spinning .gly{ animation:lens-spin 0.8s linear infinite; }
+.iconbtn:disabled{ opacity:0.55; cursor:default; }
+
+/* ════════════════════════════════════════════════════════════════════════
+   2 · BODY — left | splitter | right; a grid that FLOWS in the single scroller.
+   align-items:start so each column establishes its own sticky context (the
+   lefthead sticks against the scroller, the inspector pins independently).
+   Left track width driven by --lens-left-w (the splitter writes it on #app);
+   default keeps the locked 1.55fr : 1fr proportion with a 6px divider between.
+   ════════════════════════════════════════════════════════════════════════ */
+.body{
+  display:grid;
+  grid-template-columns:var(--lens-left-w, minmax(0,1.55fr)) 6px minmax(340px,1fr);
+  align-items:start;
+  background:transparent;
+}
+
+/* ─────────────────────── LEFT PANE (flows in .scroll) ─────────────────────── */
+.left{
+  position:relative;
+  min-width:0;
+  background:var(--substrate-solid);   /* crisp data ground (refracts under glass) */
+}
+
+/* sticky controls + ruler glass, pinned just BELOW bar1 (top:48). Rows scroll
+   UNDER it and refract through the backdrop blur — the signature effect. The
+   .glass class (base.css) supplies var(--glass-1) + -webkit-backdrop-filter
+   FIRST + the @supports fallback. */
+.lefthead{
+  position:sticky; top:48px; z-index:35;
+  border:0; border-radius:0;
+  border-bottom:1px solid var(--glass-border);
+}
+
+/* bottom breathing room so the last rows clear the sticky statusbar */
+#list{ padding-bottom:32px; }
+
+/* left-aligned toolbar buttons (board.html .controls / .tbtn) + a flex spacer
+   that pushes the refresh icon button to the FAR RIGHT of the controls row. */
+.controls{
+  display:flex; align-items:center; gap:var(--sp-3);
+  height:34px; padding:0 var(--sp-5);
+}
+/* the spacer doubles as the active-filter chip strip (#filterchips) — it must still absorb the
+   free space, and must clip rather than push #refresh off the row when many filters are on. */
+.controls .ctl-flex{
+  flex:1 1 auto; min-width:0;
+  display:flex; align-items:center; gap:5px;
+  overflow:hidden; white-space:nowrap;
+}
+.tbtn{
+  display:inline-flex; align-items:center; gap:var(--sp-3);
+  height:25px; padding:0 10px;
+  border-radius:var(--r-sm);
+  background:rgba(255,255,255,0.07);
+  border:1px solid var(--line);
+  color:var(--fg-2); font:inherit; font-size:var(--fs-xs);
+  cursor:pointer; white-space:nowrap;
+  transition:border-color var(--dur) var(--ease), color var(--dur) var(--ease), background var(--dur) var(--ease);
+}
+.tbtn:hover{ border-color:var(--line-2); color:var(--fg); }
+.tbtn.on{ color:var(--accent); border-color:rgba(217,119,87,0.45); background:var(--accent-soft); }
+/* disabled (e.g. Folder/Type grouping in browse — only applies to search results) */
+.tbtn:disabled{ opacity:0.4; cursor:default; pointer-events:none; }
+.tbtn .ar{ color:var(--faint); }
+.tbtn .km{ color:var(--c-data_matrix); font-family:var(--font-mono); }
+/* the 4-swatch type preview on #typesbtn */
+.tbtn .swatches{ display:inline-flex; gap:2px; }
+.tbtn .swatches i{ width:6px; height:6px; border-radius:2px; display:inline-block; }
+
+/* ---- #livebtn — the live-update switch (a state readout, not a menu) ----
+   LIVE  = a green dot, softly pulsing: the window follows the disk.
+   HELD  = an amber dot, still, and the label counts the reloads being withheld. Amber rather than
+   grey because held-back updates are a state you must be able to see you are in — a greyed-out
+   control reads as "unavailable", which is the wrong story. */
+.tbtn .livedot{
+  width:7px; height:7px; border-radius:50%; display:inline-block; flex:0 0 auto;
+  /* An explicit green, not a category token: this dot means GO, and --c-code happens to be blue.
+     Lightened off the house green (#1b6b3a) so it reads at 7px on the dark substrate. */
+  background:#3fae6a;
+  box-shadow:0 0 0 0 rgba(63,174,106,0.55);
+  animation:lens-livepulse 2.4s var(--ease) infinite;
+}
+.tbtn.held{ color:var(--fg-2); border-color:rgba(224,130,20,0.45); background:rgba(224,130,20,0.10); }
+.tbtn.held .livedot{ background:#e08214; box-shadow:none; animation:none; }
+@keyframes lens-livepulse{
+  0%   { box-shadow:0 0 0 0   rgba(63,174,106,0.50); }
+  70%  { box-shadow:0 0 0 5px rgba(63,174,106,0);    }
+  100% { box-shadow:0 0 0 0   rgba(63,174,106,0);    }
+}
+@media (prefers-reduced-motion: reduce){
+  .tbtn .livedot{ animation:none; }
+}
+
+/* Right-hand track widths, shared by .ruler and .row. They MUST stay identical or the column
+   headers stop lining up with the data underneath — which is why they are tokens here and not two
+   hand-kept copies of the same magic numbers (the copies are how they drifted).
+
+   Sized by MEASUREMENT (2026-08-10), against the fonts that actually render: SF Pro 10px for the
+   ruler and SF Mono 11px for the data. ("IBM Plex Sans"/"IBM Plex Mono" head both stacks but are
+   neither bundled nor installed, so the fallback is what ships — see base.css:2.)
+
+     track     header             widest datum          binds on
+     SIZE      "SIZE ▾"   30.0px  "99.9 MB"     49.0px  data   -> 56px (7px spare)
+     MODIFIED  "MODIFIED ▾" 58.6px  "11mo"+dot  38.0px  HEADER -> 64px (5.4px spare)
+
+   MODIFIED is header-bound because the active-sort arrow sits on it permanently under the default
+   "newest" sort. At 54px that header overflowed 4.6px LEFT into the SIZE column — the long-standing
+   "SIZ MODIFIED" collision. */
+:root{
+  --col-size:56px;
+  --col-mod:64px;
+}
+
+/* column-header ruler — tappable to sort; same grid track as .row */
+.ruler{
+  display:grid;
+  grid-template-columns:10px 18px minmax(0,1fr) auto var(--col-size) var(--col-mod);
+  align-items:center; height:25px;
+  padding-left:10px; padding-right:8px;
+  /* seamless: no internal seams — the only hairline is .lefthead's bottom (header↔rows) */
+  font-size:var(--fs-2xs); letter-spacing:.04em;
+  text-transform:uppercase; color:var(--muted);
+}
+.ruler .rh{
+  cursor:pointer; user-select:none;
+  display:inline-flex; align-items:center; gap:3px;
+  transition:color var(--dur) var(--ease);
+}
+.ruler .rh:hover{ color:var(--fg); }
+.ruler .rname{ grid-column:3; padding-left:6px; }
+.ruler .rdims{ grid-column:4; padding-right:8px; cursor:default; }
+.ruler .rsize{ grid-column:5; justify-content:flex-end; color:var(--fg-2); }
+.ruler .rmod{ grid-column:6; justify-content:flex-end; }
+/* active-sort affordance: the arrow reads in accent */
+.ruler .rh .arr{ color:var(--accent); }
+.ruler .rh.is-active{ color:var(--fg); }
+
+/* ─────────────────────── #list — the tree ─────────────────────── */
+.tree{ position:relative; outline:none; }
+.tree:focus-visible{ box-shadow:inset 0 0 0 2px rgba(217,119,87,0.30); }
+
+/* THE ROW — six-column grid; absolute left rail; category-colour wash.
+   (Tree/board are 6-col: tw · glyph · nm · dims · sz · mt.) */
+.row{
+  display:grid;
+  grid-template-columns:calc(10px + var(--ind,0px)) 18px minmax(0,1fr) auto var(--col-size) var(--col-mod);
+  align-items:center; height:var(--row-h);
+  padding-left:0; padding-right:8px;
+  position:relative; cursor:default; --ind:0px;
+  /* Native windowing: WebKit skips layout/paint for rows outside the scrollport, so scrolling a
+     38k-entry tree stays O(visible) not O(total). Rows are fixed-height (--row-h), so the skipped
+     placeholder is exact and the scrollbar never jumps. This is what keeps the scroll smooth. */
+  content-visibility:auto;
+  contain-intrinsic-size:auto var(--row-h);
+}
+/* the signature 4px left colour-rail */
+.row .rail{
+  position:absolute; left:0; top:0; bottom:0; width:4px;
+  background:var(--cc, var(--c-other));
+}
+/* the ::before category wash — fades right ~190px from the rail. Gives the
+   tree vibrancy AND gives the sticky glass real colour bands to refract. */
+.row::before{
+  content:""; position:absolute; left:0; top:0; bottom:0; width:190px;
+  pointer-events:none; z-index:0;
+  background:linear-gradient(to right,
+    color-mix(in srgb, var(--cc, var(--c-other)) 16%, transparent), transparent);
+}
+.row.dir::before{ display:none; }
+.row.broken::before{
+  background:linear-gradient(to right,
+    color-mix(in srgb, var(--err) 16%, transparent), transparent);
+}
+.row > *{ position:relative; z-index:1; }
+.row.indented{ --ind:16px; }
+
+.row .tw{ grid-column:1; justify-self:end; padding-right:2px; color:var(--muted); font-size:10px; text-align:center; }
+.row .glyph{
+  grid-column:2; color:var(--cc); font-family:var(--font-mono);
+  font-size:var(--fs-md); text-align:center;
+}
+.row .nm{
+  grid-column:3; padding-left:6px;
+  font-family:var(--font-ui); font-size:var(--fs-md); color:var(--fg);
+  white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
+}
+.row .dims{
+  grid-column:4; font-family:var(--font-mono); font-size:var(--fs-xs);
+  color:var(--muted); padding-right:8px; white-space:nowrap;
+}
+.row .dims .x{ color:var(--faint); margin:0 1px; }
+.row .sz{
+  grid-column:5; font-family:var(--font-mono); font-size:var(--fs-xs);
+  color:var(--muted); text-align:right;
+}
+.row .sz.heavy{ color:var(--fg-2); font-weight:var(--fw-med); }
+.row .mt{
+  grid-column:6; font-family:var(--font-mono); font-size:var(--fs-xs);
+  color:var(--muted); text-align:right;
+  display:inline-flex; align-items:center; gap:5px; justify-content:flex-end;
+}
+.row .mt .dot{ width:5px; height:5px; border-radius:50%; flex:0 0 auto; }
+
+/* states */
+.row:hover{ background:rgba(255,255,255,0.035); }
+.row.is-hover{ background:rgba(255,255,255,0.05); }
+/* keyboard cursor = a 2px accent inset; the left rail keeps the file hue */
+.row.active{ background:rgba(255,255,255,0.055); }
+.row.active::after{
+  content:""; position:absolute; inset:0; pointer-events:none;
+  border-radius:2px; box-shadow:inset 0 0 0 1.5px rgba(217,119,87,0.60);
+}
+/* selection = category tint + brighter, wider, glowing rail (NEVER coral fill).
+   contract: .row.sel ; also accept .row.is-selected from older main.ts. */
+.row.sel,
+.row.is-selected{ background:color-mix(in srgb, var(--cc) 13%, transparent); }
+.row.sel .rail,
+.row.is-selected .rail{ width:5px; box-shadow:0 0 9px 0 var(--cc); }
+.row.sel .nm,
+.row.is-selected .nm{ font-weight:var(--fw-med); }
+
+/* directory row — neutral rail (scan track never goes fully blank), chevron,
+   bold name + faint path, count at the right. */
+.row.dir{ cursor:pointer; }
+.row.dir .rail{ background:var(--line-2); }
+.row.dir .tw{ color:var(--fg-2); }
+.row.dir .nm{
+  font-weight:var(--fw-bold); color:var(--fg-2); grid-column:3 / 5;
+}
+.row.dir .nm .path{
+  color:var(--faint); font-family:var(--font-mono);
+  font-size:var(--fs-xs); font-weight:var(--fw-reg);
+}
+.row.dir .cnt{
+  grid-column:5 / 7; text-align:right;
+  font-family:var(--font-mono); font-size:var(--fs-2xs); color:var(--muted);
+}
+/* "show all" inside a dir row's expand-all truncation notice (.nm .path). Reads as the one
+   clickable word in the line — same affordance as .hint .reidx. */
+.row.dir .more{ color:var(--accent); cursor:pointer; }
+.row.dir .more:hover{ text-decoration:underline; }
+
+/* broken symlink — err rail + dimmed name; BROKEN badge */
+.row.broken .rail{ background:var(--err); }
+.row.broken .glyph{ color:var(--err); }
+.row.broken .nm{ color:var(--muted); }
+/* live symlink — italic name + faint → target */
+.row.link .nm{ font-style:italic; }
+.row .lnk{
+  color:var(--faint); font-family:var(--font-mono);
+  font-size:var(--fs-xs); font-style:normal;
+}
+.row .lnk .ar{ color:var(--accent); margin:0 4px; }
+/* search-hit name fragment — the reserved 13th colour (pink). Currently unemitted: the band shows
+   whole paths rather than highlighted fragments. Kept as the reserved token pair for the moment a
+   band row wants to mark WHICH part of the name matched. */
+
+/* row badges (BROKEN / meta·obs:…) — small inline pills */
+.badge{
+  display:inline-flex; align-items:center; height:14px; padding:0 5px; margin-left:6px;
+  border-radius:var(--r-pill); font-family:var(--font-mono); font-size:var(--fs-2xs);
+  letter-spacing:.04em; vertical-align:middle;
+}
+.badge.err{
+  color:var(--err); background:color-mix(in srgb, var(--err) 14%, transparent);
+  border:1px solid color-mix(in srgb, var(--err) 38%, transparent);
+}
+.badge.meta{
+  color:var(--hit); background:var(--hit-bg);
+  border:1px solid color-mix(in srgb, var(--hit) 50%, transparent);
+}
+
+/* hover-action overlay — ⌖ locate · ⧉ copy · ⤤ reveal; gradient-masked strip
+   so size/modified fade beneath it rather than collide. */
+.rowacts{
+  position:absolute; right:0; top:0; bottom:0;
+  display:flex; align-items:center; gap:1px;
+  padding:0 6px 0 32px; opacity:0;
+  transition:opacity var(--dur) var(--ease);
+  background:linear-gradient(to right, transparent, var(--substrate-solid) 30px);
+}
+.row.sel .rowacts,
+.row.is-selected .rowacts{
+  background:linear-gradient(to right, transparent,
+    color-mix(in srgb, var(--cc) 13%, var(--substrate-solid)) 30px);
+}
+.row:hover .rowacts, .row.is-hover .rowacts{ opacity:1; }
+.rowacts .a{
+  width:20px; height:18px; display:grid; place-items:center;
+  border-radius:5px; color:var(--fg-2); font-size:11px; cursor:pointer;
+}
+.rowacts .a:hover{ background:rgba(255,255,255,0.14); color:var(--fg); }
+
+/* dir-row hover actions (folder header: ⧉ ⤤) — gradient-masked like .rowacts so the
+   folder's item-count fades beneath the icons instead of overlapping them. */
+.row.dir .dir-acts{
+  position:absolute; right:0; top:0; bottom:0; display:flex; align-items:center; gap:2px;
+  padding:0 6px 0 32px; opacity:0; transition:opacity var(--dur) var(--ease);
+  background:linear-gradient(to right, transparent, var(--substrate-solid) 30px);
+}
+.row.dir:hover .dir-acts{ opacity:1; }
+.row.dir .dir-acts .a{
+  width:18px; height:16px; display:grid; place-items:center;
+  border-radius:4px; color:var(--faint); font-size:10px; cursor:pointer;
+}
+.row.dir .dir-acts .a:hover{ background:rgba(255,255,255,0.12); color:var(--fg); }
+
+/* ─────────── #topband — the top-hits band above the tree ─────────── */
+/* Deliberately quiet: it holds the SAME .row / .row.dir markup as the tree, so the only chrome it
+   adds is one label line and the hairline that separates it from the tree below. */
+.band{ border-bottom:1px solid var(--line); margin-bottom:4px; }
+.band[hidden]{ display:none; }   /* explicit: the band is toggled by the `hidden` attribute */
+.band-h{
+  padding:4px 10px;
+  font-size:var(--fs-2xs); color:var(--muted);
+  text-transform:none; letter-spacing:.02em;
+}
+/* the bare-operator nudge ("finish the filter — type a value after ext:") */
+.band .hint{ margin:0; padding:5px 10px; }
+.band .hint b{ color:var(--fg-2); font-family:var(--font-mono); font-weight:var(--fw-med); }
+
+/* the empty tree — always names what happened and offers the click that undoes it */
+.lens-empty{
+  margin:0; padding:16px 14px;
+  font-size:var(--fs-sm); color:var(--muted); line-height:1.55;
+}
+.lens-empty .reidx{ color:var(--accent); cursor:pointer; }
+.lens-empty .reidx:hover{ text-decoration:underline; }
+
+/* .cbadge primitive lives in base.css */
+
+/* ════════════════════════════════════════════════════════════════════════
+   3 · #filters — the Types facet popover (.popover.glass-3, anchored)
+   Built from facets(); rows are .filterchip (primitive in base.css).
+   ════════════════════════════════════════════════════════════════════════ */
+/* VIEWPORT-anchored, not scroller-anchored. Every pane lives inside the ONE .scroll container, so
+   an absolutely-positioned popover is laid out against SCROLLED content: scroll the tree and it
+   slides out from under its own (sticky) trigger — the reported detach. position:fixed takes it out
+   of the scroller entirely, and main.ts anchorTypesPopover() writes top/left/max-height from
+   typesBtn.getBoundingClientRect() on open, on scroll and on resize. */
+.popover{
+  position:fixed; z-index:50;
+  top:78px;            /* fallback only — anchorTypesPopover() overwrites top/left on every open */
+  left:var(--sp-5);
+  min-width:236px; max-width:300px;
+  max-height:60vh;     /* fallback; the JS clamp is the real one (viewport bottom minus the button) */
+  padding:0;
+  display:flex; flex-direction:column;   /* the list body owns the overflow inside that clamp */
+  /* .glass-3 (base.css) supplies bg/blur/border/radius/lift */
+}
+.popover .pophead{ flex:0 0 auto; }
+.popover .pophead{
+  display:flex; align-items:center; justify-content:space-between; gap:var(--sp-4);
+  padding:var(--sp-4) var(--sp-4) var(--sp-3);
+  border-bottom:1px solid var(--line);
+}
+.popover .pophead .allnone{
+  display:inline-flex; gap:var(--sp-3);
+  font-family:var(--font-mono); font-size:var(--fs-2xs);
+}
+.popover .pophead .allnone span{ color:var(--muted); cursor:pointer; }
+.popover .pophead .allnone span:hover{ color:var(--accent); }
+.popover .pophead .allnone .div{ color:var(--faint); cursor:default; }
+
+.popover .typelist{
+  padding:var(--sp-3);
+  display:flex; flex-direction:column; gap:var(--sp-1);
+  /* min-height:0 is what lets a flex child actually shrink and scroll inside the popover's clamp */
+  flex:1 1 auto; min-height:0; overflow:auto;
+}
+/* one legend/toggle line: full-width .filterchip + a hover-revealed "only" */
+.popover .typeline{
+  display:flex; align-items:center; gap:var(--sp-3);
+  padding:1px 2px; border-radius:var(--r-sm);
+}
+.popover .typeline:hover{ background:rgba(255,255,255,0.04); }
+.popover .typeline .filterchip{ flex:1; justify-content:flex-start; }
+.popover .typeline .filterchip .lbl{ flex:1; }
+.popover .typeline .only{
+  font-family:var(--font-mono); font-size:var(--fs-2xs); color:var(--faint);
+  cursor:pointer; padding:1px 5px; border-radius:4px; opacity:0; flex:0 0 auto;
+  transition:opacity var(--dur) var(--ease), color var(--dur) var(--ease);
+}
+.popover .typeline:hover .only{ opacity:1; }
+.popover .typeline .only:hover{ color:var(--accent); background:var(--accent-soft); }
+
+/* ---- ext popover (#filters in the Logic phase) ----
+   The same .popover.glass-3 surface, but listing file EXTENSIONS as full-width
+   .filterchip rows, with a 1px .pop-sep divider between the favourite exts
+   (pinned, common) and the long tail. .extlist is the scroll body. */
+.popover .extlist{
+  padding:var(--sp-3);
+  display:flex; flex-direction:column; gap:var(--sp-1);
+  /* min-height:0 is what lets a flex child actually shrink and scroll inside the popover's clamp */
+  flex:1 1 auto; min-height:0; overflow:auto;
+}
+.popover .extlist .filterchip{
+  width:100%; justify-content:flex-start;
+}
+.popover .extlist .filterchip .lbl{
+  flex:1; font-family:var(--font-mono);
+}
+.popover .extlist .filterchip .cnt{ color:var(--muted); }
+/* the favourite ⁄ rest divider — a 1px hairline (var(--line)) with breathing room */
+.popover .pop-sep{
+  height:1px; margin:var(--sp-3) var(--sp-2);
+  background:var(--line); flex:0 0 auto;
+}
+
+/* ---- the ACTIVE-filter chips in the controls row (#filterchips) ----
+   Same .filterchip.on primitive as the popover, plus a ⨯ that removes just that filter — the
+   mouse-first way to undo one chip without reopening the Types popover. */
+#filterchips .filterchip{ flex:0 0 auto; max-width:180px; }
+#filterchips .filterchip .lbl{ font-family:var(--font-mono); overflow:hidden; text-overflow:ellipsis; }
+.filterchip .x{ margin-left:5px; cursor:pointer; opacity:.7; font-weight:var(--fw-reg); }
+.filterchip .x:hover{ opacity:1; }
+
+/* ════════════════════════════════════════════════════════════════════════
+   4 · #splitter — 6px draggable divider
+   ════════════════════════════════════════════════════════════════════════ */
+.splitter{
+  grid-column:2;
+  align-self:stretch;            /* full-height of .body (overrides align-items:start) */
+  position:sticky; top:48px;      /* stays beside the panes while the tree scrolls */
+  height:calc(100vh - 48px - 26px);
+  background:var(--line);
+  cursor:col-resize;
+  transition:background var(--dur) var(--ease);
+}
+.splitter::before{
+  content:""; position:absolute; inset:0 -3px;  /* fat hit-target */
+}
+.splitter:hover,
+.splitter.is-dragging{ background:var(--accent-soft); }
+.splitter:focus-visible{ outline:none; background:var(--accent); }
+
+/* ════════════════════════════════════════════════════════════════════════
+   5 · RIGHT PANE — preview (top) + inspector cards. PINNED, own scroll.
+   In the single-scroller shell the inspector must NOT flow with the tree:
+   #inspector-wrap is sticky top:48 with its own internal scroll, so it stays
+   put while the left tree scrolls under bar1/.lefthead. GLASS hero (the frame,
+   lit by the file's --cc) over a CRISP substrate body.
+   ════════════════════════════════════════════════════════════════════════ */
+/* align-self:stretch makes the right column span the FULL grid-row height (== the tall left
+   tree), overriding .body's align-items:start — same trick the splitter uses. Without it the
+   right cell is only ~one viewport tall, so .insp-pin's position:sticky un-sticks after the first
+   screen of scrolling and the inspector scrolls away with the tree. Stretched, the sticky stays
+   pinned the whole way down. */
+.right{ min-width:0; align-self:stretch; }
+.insp-pin{
+  position:sticky; top:48px;
+  height:calc(100vh - 48px - 26px);   /* viewport minus bar1 minus statusbar */
+  overflow:auto; min-height:0;
+  background:var(--substrate-solid);
+}
+
+.inspector, .preview{ position:relative; z-index:1; }
+
+/* ---- hero (glass, lit by --cc) ---- */
+.hero{
+  position:sticky; top:0; z-index:3;
+  padding:var(--sp-5) var(--sp-5) var(--sp-4);
+  background:var(--glass-sheen), var(--glass-2);
+  -webkit-backdrop-filter:var(--glass-blur-strong);
+  backdrop-filter:var(--glass-blur-strong);
+  border-bottom:1px solid var(--line);
+}
+.hero .top{ display:flex; align-items:center; gap:var(--sp-4); }
+.hero .hg{
+  font-family:var(--font-mono); font-size:20px; line-height:1;
+  color:var(--cc, var(--c-other));
+  text-shadow:0 0 14px color-mix(in srgb, var(--cc, var(--c-other)) 55%, transparent);
+  flex:0 0 auto;
+}
+.hero .hname{
+  flex:1; font-size:var(--fs-hero); font-weight:var(--fw-bold); color:var(--fg);
+  word-break:break-all; line-height:1.25; min-width:0;
+}
+.hbtns{ display:flex; gap:var(--sp-2); flex:0 0 auto; }
+.cbtn{
+  display:inline-flex; align-items:center; gap:5px; height:24px; padding:0 10px;
+  border-radius:var(--r-sm);
+  background:rgba(255,255,255,0.06); border:1px solid var(--line);
+  color:var(--fg-2); font:inherit; font-size:var(--fs-xs);
+  cursor:pointer; white-space:nowrap;
+  transition:border-color var(--dur) var(--ease), color var(--dur) var(--ease);
+}
+.cbtn:hover{ border-color:var(--line-2); color:var(--fg); }
+/* primary hero action (↗ Open) — accent-tinted, same treatment as .iconbtn.on / .chip.umap
+   (tint + accent text, never a solid coral fill). */
+.cbtn.primary{ color:var(--accent); border-color:rgba(217,119,87,0.45); background:var(--accent-soft); }
+.cbtn.primary:hover{ color:var(--accent-bright); border-color:rgba(217,119,87,0.7); }
+.hero .sub{
+  margin-top:var(--sp-4); font-family:var(--font-mono);
+  font-size:var(--fs-xs); color:var(--muted);
+}
+.hero .colorrule{ margin-top:var(--sp-3); }
+/* .colorrule primitive (base.css) reads --cc; the hero sets it per file */
+
+/* ---- card body (crisp, no blur) ---- */
+.cards{ padding:0 var(--sp-5); }
+.card{ padding:var(--sp-5) 0; border-top:1px solid var(--line); }
+.card:first-child{ border-top:0; }
+.card .ch{
+  display:flex; align-items:center; justify-content:space-between;
+  margin-bottom:var(--sp-4); gap:var(--sp-4);
+}
+.card .ch .r{ display:inline-flex; align-items:center; gap:var(--sp-3); }
+
+/* obs filter input + mini copy-all action (inside the open obs card) */
+.obsfilter{
+  height:21px; width:120px; border-radius:var(--r-sm); padding:0 8px;
+  background:rgba(0,0,0,0.3); border:1px solid var(--line); color:var(--fg-2);
+  font-family:var(--font-mono); font-size:var(--fs-2xs); outline:none;
+}
+.obsfilter:focus{ border-color:var(--accent); box-shadow:var(--focus-ring); }
+.obsfilter::placeholder{ color:var(--faint); }
+.miniact{ font-size:var(--fs-2xs); color:var(--muted); cursor:pointer; font-family:var(--font-mono); }
+.miniact:hover{ color:var(--accent); }
+
+/* path lines (repo-relative + dim absolute) */
+.pathline{ display:flex; align-items:flex-start; gap:8px; padding:3px 0; }
+.pathline code{
+  font-family:var(--font-mono); font-size:var(--fs-xs); color:var(--fg-2);
+  word-break:break-all; flex:1; cursor:pointer;
+}
+.pathline.dim code{ color:var(--muted); }
+.pathline .cpy{ color:var(--faint); cursor:pointer; font-size:11px; }
+.pathline .cpy:hover{ color:var(--accent); }
+
+/* the big dataset stat (n_obs × n_vars) */
+.bigstat{
+  font-size:20px; font-weight:var(--fw-bold); color:var(--fg);
+  font-variant-numeric:tabular-nums; letter-spacing:-0.01em;
+}
+.bigstat .x{ color:var(--faint); font-weight:var(--fw-reg); margin:0 5px; }
+.bigstat .sub{
+  display:block; margin-top:3px; font-size:var(--fs-xs); font-weight:var(--fw-reg);
+  color:var(--muted); font-family:var(--font-mono); letter-spacing:0;
+}
+
+/* key/value meta grid (provenance, dataset attrs) */
+.metagrid{
+  display:grid; grid-template-columns:auto 1fr; gap:4px 16px;
+  margin-top:var(--sp-5); font-family:var(--font-mono); font-size:var(--fs-xs);
+}
+.metagrid.tight{ margin-top:0; }
+.metagrid .k{ color:var(--muted); }
+.metagrid .v{ color:var(--fg-2); }
+.metagrid .v.no{ color:var(--err); }
+.metagrid .v.yes{ color:var(--ok); }
+
+/* chip clusters (obs / obsm / columns / structure / imports / refs).
+   .chip / .chip.hit / .chip.umap are primitives in base.css. */
+.chips{ display:flex; flex-wrap:wrap; gap:5px; }
+.chip .shp{ color:var(--faint); }   /* shape suffix inside a chip */
+/* the navigating doc-ref chip — a click drives a Lens search (accent + ⌕) */
+.chip.nav{ color:var(--accent); border-color:rgba(217,119,87,0.32); }
+.chip.nav:hover{ border-color:rgba(217,119,87,0.55); background:var(--accent-soft); color:var(--accent); }
+.chip.nav::before{ content:"⌕ "; color:rgba(217,119,87,0.78); }
+
+/* collapsible raw blocks (obs columns / structure / provenance / raw meta) */
+details.raw{ margin-top:2px; }
+details.raw > summary{
+  cursor:pointer; list-style:none;
+  font-size:var(--fs-2xs); font-weight:var(--fw-bold);
+  letter-spacing:var(--tracking-label); text-transform:uppercase;
+  color:var(--muted); padding:5px 0;
+}
+details.raw > summary::-webkit-details-marker{ display:none; }
+details.raw > summary::before{ content:"▸ "; color:var(--faint); }
+details.raw[open] > summary::before{ content:"▾ "; }
+.rawpre{
+  font-family:var(--font-mono); font-size:var(--fs-2xs); color:var(--muted);
+  background:rgba(0,0,0,0.28); border:1px solid var(--line); border-radius:var(--r-sm);
+  padding:8px 10px; margin:4px 0 0; max-height:140px; overflow:auto;
+  white-space:pre-wrap; word-break:break-all;
+}
+
+/* substructure groups inside the Structure block */
+.substruct{ margin-top:6px; }
+.substruct .sub-lbl{
+  font-size:var(--fs-2xs); font-weight:var(--fw-bold);
+  letter-spacing:var(--tracking-label); text-transform:uppercase; color:var(--faint);
+  margin:8px 0 6px;
+}
+.substruct .sub-lbl:first-child{ margin-top:0; }
+/* truncation affordance for huge key-spaces (uns/varm/obsp) */
+.trunc{
+  display:flex; align-items:center; gap:6px; margin-top:6px;
+  font-family:var(--font-mono); font-size:var(--fs-2xs); color:var(--faint);
+}
+.trunc .loadall{ color:var(--accent); cursor:pointer; }
+.trunc .loadall:hover{ text-decoration:underline; }
+
+/* code docstring / doc lede — the one prose moment */
+.quote{
+  border-left:2px solid var(--cc, var(--accent)); padding:2px 0 2px 10px;
+  margin:0 0 var(--sp-4); color:var(--fg-2);
+  font-size:var(--fs-sm); line-height:1.5;
+}
+.doctitle{
+  font-size:var(--fs-lg); font-weight:var(--fw-bold); color:var(--fg);
+  margin:0 0 var(--sp-3);
+}
+.docpara{ font-size:var(--fs-sm); color:var(--fg-2); line-height:1.55; margin:0 0 var(--sp-4); }
+
+/* soft inline hint (re-index nudge, figure-not-embedded note) */
+.hint{
+  display:flex; align-items:center; gap:6px;
+  font-family:var(--font-mono); font-size:var(--fs-2xs); color:var(--faint);
+  margin-top:var(--sp-4);
+}
+.hint .reidx{ color:var(--accent); cursor:pointer; }
+.hint .reidx:hover{ text-decoration:underline; }
+
+/* figure placeholder (no embedded preview) */
+.figslot{
+  height:104px; border-radius:var(--r-md); border:1px dashed var(--line-2);
+  background:rgba(0,0,0,0.22);
+  display:flex; flex-direction:column; align-items:center; justify-content:center;
+  gap:4px; color:var(--faint);
+}
+.figslot .fg{
+  font-family:var(--font-mono); font-size:24px; color:var(--cc);
+  opacity:0.6; text-shadow:0 0 14px color-mix(in srgb, var(--cc) 40%, transparent);
+}
+.figslot .ft{ font-size:var(--fs-2xs); }
+
+/* ---- LINEAGE (refs / ref_by) — clickable xref links ----
+   contract: .xref (+ .xref.is-dangling) with .xref__kind + .xref__name. */
+.xref{
+  display:inline-flex; align-items:baseline; gap:6px;
+  padding:3px 0; cursor:pointer; max-width:100%;
+  color:var(--fg-2); text-decoration:none;
+  transition:color var(--dur) var(--ease);
+}
+.xref:hover{ color:var(--accent); }
+.xref__kind{
+  font-family:var(--font-mono); font-size:var(--fs-2xs);
+  color:var(--faint); text-transform:uppercase; letter-spacing:.04em; flex:0 0 auto;
+}
+.xref__name{
+  font-family:var(--font-mono); font-size:var(--fs-xs);
+  word-break:break-all; min-width:0;
+}
+.xref::before{ content:"→ "; color:rgba(217,119,87,0.7); flex:0 0 auto; }
+/* a dangling lineage ref — target absent from the index (err-tinted, inert) */
+.xref.is-dangling{ color:var(--muted); cursor:default; }
+.xref.is-dangling:hover{ color:var(--muted); }
+.xref.is-dangling::before{ content:"⤫ "; color:var(--err); }
+.xref.is-dangling .xref__name{
+  text-decoration:line-through;
+  text-decoration-color:color-mix(in srgb, var(--err) 50%, transparent);
+}
+
+/* ---- empty inspector state ---- */
+.empty{
+  height:100%; display:flex; flex-direction:column;
+  align-items:center; justify-content:center; gap:var(--sp-5);
+  text-align:center; padding:var(--sp-7);
+}
+.empty .eg{
+  font-family:var(--font-mono); font-size:40px; color:var(--faint);
+  opacity:0.5; line-height:1;
+}
+.empty .em{ font-size:var(--fs-md); color:var(--muted); max-width:30ch; line-height:1.5; }
+.empty .ek{
+  display:flex; gap:var(--sp-5); flex-wrap:wrap; justify-content:center;
+  font-family:var(--font-mono); font-size:var(--fs-2xs); color:var(--faint);
+}
+.empty .ek b{ color:var(--fg-2); font-weight:var(--fw-med); }
+
+/* ════════════════════════════════════════════════════════════════════════
+   6 · PREVIEW — image on a white stage + the rendered-markdown iframe
+   ════════════════════════════════════════════════════════════════════════ */
+/* image renders inline on its own WHITE ground (paper) */
+.stage-paper{
+  position:relative; margin:var(--sp-5);
+  border-radius:var(--r-md); overflow:hidden;
+  border:1px solid var(--line);
+  background:#ffffff;
+  box-shadow:inset 0 0 0 1px rgba(0,0,0,0.04), var(--lift-1);
+}
+.stage-paper img,
+.stage-paper svg{ display:block; width:100%; height:auto; }
+/* fit/zoom + external-open glass bar over the image */
+.stage-paper .imgbar{
+  position:absolute; left:0; right:0; bottom:0;
+  display:flex; align-items:center; gap:var(--sp-3);
+  height:28px; padding:0 var(--sp-3);
+  background:var(--glass-sheen), var(--glass-3);
+  -webkit-backdrop-filter:var(--glass-blur);
+  backdrop-filter:var(--glass-blur);
+  border-top:1px solid var(--glass-border);
+  font-family:var(--font-mono); font-size:var(--fs-2xs); color:var(--fg-2);
+}
+.stage-paper .imgbar .seg{ margin-left:auto; }
+.stage-paper .imgbar .iz{ color:var(--muted); cursor:pointer; padding:0 4px; }
+.stage-paper .imgbar .iz:hover{ color:var(--fg); }
+
+/* the sandboxed markdown iframe — comrak+ammonia HTML via repoindex://md/<id>.
+   The iframe is its own document; styling INSIDE it is the Rust route's job
+   (it injects its own <style>). Here we only frame the iframe element. */
+.md-doc{
+  display:block; width:calc(100% - 2 * var(--sp-5));
+  margin:var(--sp-5);
+  min-height:320px; border:1px solid var(--line); border-radius:var(--r-md);
+  background:var(--substrate-solid);
+}
+
+/* ════════════════════════════════════════════════════════════════════════
+   7 · STATUS BAR — global bottom glass
+   ════════════════════════════════════════════════════════════════════════ */
+.statusbar{
+  position:sticky; bottom:0; z-index:40;
+  height:26px;
+  display:flex; align-items:center; gap:var(--sp-5);
+  padding:0 var(--sp-5);
+  border:0; border-top:1px solid var(--glass-border); border-radius:0;
+  font-family:var(--font-mono); font-size:var(--fs-2xs); color:var(--muted);
+}
+.statusbar .sb-spacer{ flex:1 1 auto; }
+.statusbar .keys{ display:flex; gap:var(--sp-5); }
+.statusbar .keys span b{ color:var(--fg-2); font-weight:var(--fw-med); }
+/* .status / .status.ok/.warn/.err primitives live in base.css */
+
+/* ════════════════════════════════════════════════════════════════════════
+   8 · CONTEXT MENU — #rowmenu (.rowmenu.glass-3) + .menu-item + .menu-sep
+   ════════════════════════════════════════════════════════════════════════ */
+.rowmenu{
+  position:fixed; z-index:60;
+  min-width:200px; padding:var(--sp-2);
+  /* .glass-3 (base.css) supplies bg/blur/border/radius/lift */
+}
+.menu-item{
+  display:flex; align-items:center; gap:var(--sp-4);
+  width:100%; height:28px; padding:0 var(--sp-4);
+  border:0; background:transparent; border-radius:var(--r-sm);
+  color:var(--fg-2); font:inherit; font-size:var(--fs-sm);
+  text-align:left; cursor:pointer;
+  transition:background var(--dur) var(--ease), color var(--dur) var(--ease);
+}
+.menu-item:hover{ background:rgba(255,255,255,0.07); color:var(--fg); }
+.menu-sep{ height:1px; margin:var(--sp-2) var(--sp-3); background:var(--line); }
+
+/* ════════════════════════════════════════════════════════════════════════
+   9 · TOAST — transient confirmation (smallest glass-3 surface; a pill)
+   Used by copy/reveal confirmations. main.ts spawns .toast.glass-3.
+   ════════════════════════════════════════════════════════════════════════ */
+.toast{
+  position:fixed; left:50%; bottom:44px; transform:translateX(-50%);
+  z-index:70;
+  display:inline-flex; align-items:center; gap:var(--sp-3);
+  height:30px; padding:0 var(--sp-5); border-radius:var(--r-pill);
+  font-size:var(--fs-sm); color:var(--fg); white-space:nowrap;
+  /* .glass-3 supplies the frost */
+}
+.toast .ic{ font-family:var(--font-mono); }
+.toast .ic.ok{ color:var(--ok); }
+.toast .ic.act{ color:var(--accent); }
+.toast .path{ font-family:var(--font-mono); font-size:var(--fs-xs); color:var(--fg-2); }
+
+/* ════════════════════════════════════════════════════════════════════════
+   10 · HEALTH VIEW — tiles + broken/errors tables (mode=health).
+   These styles match health.html. main.ts swaps the body for the .scan canvas.
+   ════════════════════════════════════════════════════════════════════════ */
+.scan{
+  overflow:auto; min-height:0;
+  padding:var(--sp-6) var(--sp-6) var(--sp-7);
+  background:var(--glass-sheen), var(--glass-2);
+  -webkit-backdrop-filter:var(--glass-blur);
+  backdrop-filter:var(--glass-blur);
+}
+.scanhead{ display:flex; align-items:baseline; gap:var(--sp-4); margin-bottom:var(--sp-5); }
+.scanhead .h{ font-size:var(--fs-hero); font-weight:var(--fw-bold); color:var(--fg); letter-spacing:-0.01em; }
+.scanhead .sub{ font-family:var(--font-mono); font-size:var(--fs-xs); color:var(--muted); }
+
+/* the header broken-symlink deep-link chip */
+.brokenchip{
+  display:inline-flex; align-items:center; gap:5px; height:22px; padding:0 9px;
+  border-radius:var(--r-pill); font-size:var(--fs-xs); cursor:pointer; white-space:nowrap;
+  font-variant-numeric:tabular-nums;
+}
+.brokenchip.zero{ color:var(--muted); background:rgba(255,255,255,0.04); border:1px solid var(--line); }
+.brokenchip.zero .g{ color:var(--faint); font-family:var(--font-mono); }
+.brokenchip.active{
+  color:var(--warn); background:color-mix(in srgb, var(--warn) 13%, transparent);
+  border:1px solid color-mix(in srgb, var(--warn) 38%, transparent);
+}
+
+/* stat tiles — crisp opaque cards on the substrate (data, not chrome) */
+.tiles{ display:grid; grid-template-columns:repeat(auto-fit,minmax(128px,1fr)); gap:var(--sp-5); }
+.tile{
+  position:relative; overflow:hidden;
+  background:var(--substrate-solid); border:1px solid var(--line);
+  border-radius:var(--r-lg); padding:var(--sp-5) var(--sp-5) var(--sp-4);
+  box-shadow:var(--hairline);
+}
+.tile .num{
+  font-size:30px; font-weight:var(--fw-bold); color:var(--fg);
+  font-variant-numeric:tabular-nums; letter-spacing:-0.02em; line-height:1;
+  font-family:var(--font-mono);
+}
+.tile .lbl{
+  display:block; margin-top:var(--sp-3);
+  font-size:var(--fs-2xs); font-weight:var(--fw-bold);
+  letter-spacing:var(--tracking-label); text-transform:uppercase; color:var(--muted);
+}
+/* thin top colour-strip — same hue-first wayfinding as the tree rail */
+.tile::before{
+  content:""; position:absolute; left:0; right:0; top:0; height:2px;
+  background:var(--tc, var(--line-2));
+}
+.tile.ok .num{ color:var(--ok); }
+.tile.ok::before{ background:var(--ok); box-shadow:0 0 10px -2px var(--ok); }
+.tile.err .num{ color:var(--err); }
+.tile.err::before{ background:var(--err); box-shadow:0 0 10px -2px var(--err); }
+.tile .tag{ position:absolute; right:var(--sp-5); top:var(--sp-5); font-family:var(--font-mono); font-size:var(--fs-sm); }
+.tile.ok .tag{ color:var(--ok); }
+.tile.err .tag{ color:var(--err); }
+
+/* calm "all clear" line */
+.allclear{
+  display:flex; align-items:center; gap:var(--sp-4); margin-top:var(--sp-5);
+  padding:var(--sp-4) var(--sp-5); border-radius:var(--r-md);
+  background:color-mix(in srgb, var(--ok) 9%, transparent);
+  border:1px solid color-mix(in srgb, var(--ok) 30%, transparent);
+  box-shadow:var(--hairline);
+}
+.allclear .ck{ color:var(--ok); font-size:15px; }
+.allclear .msg{ font-family:var(--font-mono); font-size:var(--fs-xs); color:var(--fg-2); }
+.allclear .msg .d{ color:var(--muted); }
+
+/* problem section header */
+.probhdr{ display:flex; align-items:center; gap:var(--sp-3); margin:var(--sp-7) 0 var(--sp-4); }
+.probhdr .lead{ color:var(--err); font-size:var(--fs-md); }
+.probhdr .lead.warn{ color:var(--warn); }
+
+/* dense problem tables — substrate, 22px rows, clickable to inspect */
+.ptable{
+  background:var(--substrate-solid); border:1px solid var(--line);
+  border-radius:var(--r-md); overflow:hidden; box-shadow:var(--hairline);
+}
+.ptable .thead{
+  display:grid; align-items:center; height:20px; padding:0 10px;
+  border-bottom:1px solid var(--line); color:var(--faint);
+  font-size:var(--fs-2xs); letter-spacing:.04em; text-transform:uppercase;
+}
+.ptable .prow{
+  display:grid; align-items:center; height:var(--row-h); padding:0 10px;
+  position:relative; cursor:pointer; border-top:1px solid var(--line);
+}
+.ptable .prow:first-of-type{ border-top:0; }
+.ptable .prow:hover{ background:rgba(255,255,255,0.035); }
+.ptable .prow:hover .cp{ opacity:1; }
+/* left status rail — err/warn coloured */
+.ptable .prow::before{
+  content:""; position:absolute; left:0; top:0; bottom:0; width:3px;
+  background:var(--rc, var(--err));
+}
+.ptable .c{
+  font-family:var(--font-mono); font-size:var(--fs-xs); white-space:nowrap;
+  overflow:hidden; text-overflow:ellipsis;
+}
+.ptable .c.path{ color:var(--fg-2); }
+.ptable .c.target{ color:var(--muted); }
+.ptable .c.target .arr{ color:var(--faint); margin-right:5px; }
+.ptable .c.extr{ color:var(--c-config); }
+.ptable .c.errmsg{ color:var(--err); }
+.ptable .cp{
+  color:var(--faint); font-size:11px; text-align:center; opacity:0;
+  cursor:pointer; transition:opacity var(--dur) var(--ease);
+}
+/* broken-symlink grid: path | → target | copy */
+.ptable.links .thead, .ptable.links .prow{
+  grid-template-columns:minmax(0,1.15fr) minmax(0,1fr) 18px; gap:var(--sp-5);
+}
+/* errors grid: path | extractor | error | copy */
+.ptable.errs .thead, .ptable.errs .prow{
+  grid-template-columns:minmax(0,1fr) 64px minmax(0,1.1fr) 18px; gap:var(--sp-5);
+}
+
+/* "illustrative, not real" banner */
+.egbanner{
+  display:inline-flex; align-items:center; gap:5px; height:20px; padding:0 9px;
+  border-radius:var(--r-pill);
+  font-size:var(--fs-2xs); font-weight:var(--fw-bold);
+  letter-spacing:var(--tracking-label); text-transform:uppercase;
+  color:var(--warn); background:color-mix(in srgb, var(--warn) 12%, transparent);
+  border:1px solid color-mix(in srgb, var(--warn) 34%, transparent);
+}
+
+/* fix: .cp was a stray in-flow grid child breaking column alignment — rowacts covers copy on hover */
+.row .cp{ display:none; }

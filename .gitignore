@@ -1,0 +1,22 @@
+# ── build output ────────────────────────────────────────────────────────────────
+node_modules/
+dist/
+app/src-tauri/target/
+app/src-tauri/gen/
+release/
+*.dmg
+
+# ── python ──────────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.venv/
+venv/
+
+# ── macOS ───────────────────────────────────────────────────────────────────────
+.DS_Store
+._*
+
+# ── an index built while testing (never commit someone's file listing) ──────────
+_repo_index/

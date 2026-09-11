@@ -1,0 +1,157 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Lens</title>
+    <!-- base.css = the SINGLE design-token source (the locked Lens liquid-glass design).
+         lens.css COMPOSES the finder's components from its tokens — NEVER redefines a token. -->
+    <link rel="stylesheet" href="/src/styles/base.css" />
+    <link rel="stylesheet" href="/src/styles/lens.css" />
+  </head>
+  <!-- transparent body so the macOS NSVisualEffectView vibrancy (apply_vibrancy in
+       the Rust .setup()) shows through; the deep canvas + chrome glass sit over it. -->
+  <body>
+    <!-- ════════════════════════════════════════════════════════════════════════
+         LENS SHELL — the locked liquid-glass two-pane finder.
+         Frozen ids (contract): #search #filters #list #splitter #preview #inspector.
+         REFRACTION (single-scroller): .scroll is the ONE scroll container. bar1 is
+         position:sticky top:0 INSIDE it, .lefthead is sticky top:48 INSIDE it — so the
+         file rows scroll UNDER *both* and refract through their backdrop blur (the
+         signature effect, full-width across the top). The inspector is pinned (its own
+         scroll); the statusbar is sticky bottom glass. Verified rule: backdrop-filter
+         only refracts SCROLLED content when the glass is sticky inside the scroller.
+
+         DOM CONTRACT for the dynamic content main.ts builds (lens.css styles these):
+           file row : <div class="row" data-id data-path data-cat style="--cc:var(--c-<cat>)">
+                        <span class="rail"></span><span class="tw"></span>
+                        <span class="glyph">G</span><span class="nm">name</span>
+                        <span class="dims">N×N</span><span class="sz">12 KB</span>
+                        <span class="mt"><i class="dot"></i>3d</span></div>
+                      (+ .indented for depth via --ind; + .sel when selected)
+           dir row  : <div class="row dir" data-path data-open>
+                        <span class="tw">▾</span><span class="nm">folder<span class="path">/ …</span></span>
+                        <span class="cnt">N</span></div>
+           hover row actions live in <span class="rowacts"> (locate/copy/reveal), gradient-masked;
+                        dir rows add ⇊ "expand all here" in <span class="dir-acts">.
+           top hits  : <div id="topband" class="band"><div class="band-h">…</div> + the SAME .row /
+                        .row.dir markup, full-path labelled. Shown whenever a query is active.
+           inspector: .hero (glyph+name+actions+sub+colorrule) then .cards > .card (Path, Dataset,
+                        Obs columns [details.raw], Obsm, Lineage [xref links], Provenance).
+           facet chip (#filters): .filterchip[.on/.off] (g + lbl + cnt), --cc per category.
+           #filters is position:FIXED and re-anchored to #typesbtn by main.ts anchorTypesPopover()
+                        on open/scroll/resize — absolute would ride the scroller away from its button.
+           #livebtn  : the live-update switch. .tbtn + .livedot; gains .held and the label counts the
+                        withheld watcher flushes ("Held · 3"). State persists in localStorage.
+         ════════════════════════════════════════════════════════════════════════ -->
+    <div id="app" class="shell">
+
+      <!-- ░░ THE SINGLE SCROLLER — bar1 + lefthead + inspector + status all sticky inside ░░ -->
+      <div class="scroll">
+
+        <!-- ░░ BAR 1 — FULL-WIDTH top glass, sticky top:0 inside .scroll: search · view ░░
+             File rows scroll UNDER it across the whole width and refract through the blur. -->
+        <header class="bar1 glass" data-tauri-drag-region>
+          <!-- NO in-app brand: the macOS-native window title "Lens" renders to the RIGHT of the
+               traffic-lights. bar1 is left-inset (lens.css --titlebar-inset) far enough to clear
+               BOTH the traffic-lights AND that native title, so the search starts cleanly to its
+               right. Browse/Health on the RIGHT. -->
+          <div class="searchwrap">
+            <span class="lead" aria-hidden="true">⌕</span>
+            <input id="search" class="search" type="search" autocomplete="off" spellcheck="false"
+                   placeholder="search…    cat: · type: · ext: · path: · dir: · obs:" aria-label="Search" />
+          </div>
+          <!-- Opt-in: fold the text RENDERED INSIDE figures (axis labels, legends, gene symbols)
+               into the search. Off by default — with it off the backend runs the pre-feature SQL
+               verbatim, so ordinary search pays nothing for this feature existing. -->
+          <label class="figtoggle" id="figtogglewrap"
+                 title="Also search the text rendered inside figures — axis labels, legends, gene symbols">
+            <input type="checkbox" id="figtoggle" />
+            <span>figure text</span>
+          </label>
+          <span class="sb-flex"></span>
+          <span class="seg" id="modeseg" role="group" aria-label="View">
+            <button class="active" data-mode="browse">Browse</button>
+            <button data-mode="health">Health</button>
+          </span>
+        </header>
+
+        <!-- ░░ BODY — left | splitter | right; a grid that flows in the single scroller ░░ -->
+        <div class="body">
+
+          <!-- LEFT: sticky controls+ruler glass (top:48); file tree refracts under it. -->
+          <section class="left">
+            <div class="lefthead glass">
+              <div class="controls">
+                <button class="tbtn" id="sortbtn">↕ <span id="sortlabel">Newest</span> <span class="ar">▾</span></button>
+                <button class="tbtn" id="typesbtn">
+                  <span class="swatches" aria-hidden="true"><i style="background:var(--c-data_matrix)"></i><i style="background:var(--c-data_table)"></i><i style="background:var(--c-code)"></i><i style="background:var(--c-figure)"></i></span>
+                  Types <span class="ar" id="typescount">12 ▾</span>
+                </button>
+                <!-- removable chips for every active filter (main.ts paintFilterChrome); the slot
+                     doubles as the flex spacer that pushes #refresh to the far right. -->
+                <span class="ctl-flex" id="filterchips"></span>
+                <!-- Live-update switch. The watcher reloads the whole window on every committed
+                     index flush, which yanks the tree out from under a click mid-search; this holds
+                     those reloads (counting them) until you ask for them. -->
+                <button class="tbtn" id="livebtn" aria-pressed="false"
+                        title="Live updates: the window reloads when files change on disk. Click to hold.">
+                  <i class="livedot" aria-hidden="true"></i> <span id="livelabel">Live</span>
+                </button>
+                <button class="iconbtn" id="refresh" title="Reindex — re-scan the repo for new/changed files" aria-label="Reindex"><span class="gly">⟳</span></button>
+              </div>
+              <div class="ruler" id="ruler" role="row">
+                <span class="rh rname" data-sort="name" role="columnheader">name</span>
+                <span class="rh rdims" role="columnheader">dims</span>
+                <span class="rh rsize" data-sort="size" role="columnheader">size</span>
+                <span class="rh rmod" data-sort="mtime" role="columnheader">modified</span>
+              </div>
+            </div>
+            <!-- #topband — the top-hits strip. Sits INSIDE the same scroller, immediately above
+                 #list, so it scrolls under the sticky .lefthead like everything else. Hidden
+                 whenever the query is empty; main.ts fills it from query.ts topHits(). -->
+            <div id="topband" class="band" hidden></div>
+            <div id="list" class="tree" role="tree" aria-label="Files" tabindex="0"></div>
+
+            <!-- #filters — the Types facet popover (built from facets()); toggled by #typesbtn -->
+            <div id="filters" class="popover hidden glass-3" role="group" aria-label="Filter by type"></div>
+          </section>
+
+          <div id="splitter" class="splitter" role="separator" aria-orientation="vertical"
+               aria-label="Resize panes" tabindex="0"></div>
+
+          <!-- RIGHT: preview (top) + inspector cards. Pinned; own scroll. -->
+          <section class="right">
+            <div id="inspector-wrap" class="insp-pin">
+              <div id="preview" class="preview" role="region" aria-label="Preview"></div>
+              <div id="inspector" class="inspector" role="region" aria-label="Inspector"></div>
+            </div>
+          </section>
+        </div>
+
+        <!-- ░░ STATUS — sticky-bottom glass inside the scroller ░░ -->
+        <footer class="statusbar glass">
+          <span id="statuscount" class="status">—</span>
+          <span class="sb-spacer"></span>
+          <span id="statushealth" class="status">Index ready</span>
+          <span class="keys">
+            <span><b>/</b> search</span><span><b>↑↓</b> move</span><span><b>⏎</b> inspect</span>
+          </span>
+        </footer>
+
+      </div>
+
+      <!-- ░░ CONTEXT MENU (right-click a row) — overlay, outside the scroller ░░ -->
+      <div id="rowmenu" class="rowmenu hidden glass-3" role="menu">
+        <button class="menu-item" data-action="reveal" role="menuitem">⤤ Reveal in Finder</button>
+        <div class="menu-sep"></div>
+        <button class="menu-item" data-action="copy" data-kind="abs" role="menuitem">⧉ Copy absolute path</button>
+        <button class="menu-item" data-action="copy" data-kind="rel" role="menuitem">⧉ Copy relative path</button>
+        <button class="menu-item" data-action="copy" data-kind="posix" role="menuitem">⧉ Copy POSIX path</button>
+        <button class="menu-item" data-action="copy" data-kind="file_uri" role="menuitem">⧉ Copy file:// URI</button>
+      </div>
+    </div>
+
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

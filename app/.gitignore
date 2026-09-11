@@ -1,0 +1,29 @@
+# Lens (Tauri 2 + Vite + TS) — keep SOURCE, drop build output / deps / cruft.
+#
+# NOTE: the repo-ROOT .gitignore ignores *.html (L69), *.json (L149), *.png (L61) to keep data,
+# figures, and docs out of git. Those patterns also catch this app's real source (index.html,
+# tauri.conf.json, capabilities, package.json, icons …), so this deeper .gitignore RE-INCLUDES it
+# via the negations below (a nested .gitignore overrides the root for files). Order matters: the
+# directory-ignores above + the final ._* re-ignore bracket the negations, so build dirs and
+# AppleDouble siblings can never sneak back in.
+
+# ── Build output / dependencies (DIRECTORY-ignored — negations below can't resurface contents) ──
+node_modules/
+dist/
+target/
+src-tauri/target/
+src-tauri/gen/
+
+# ── Icon-render scratch (gen_icons.py is kept; the PNG/contact-sheet intermediates regenerate) ──
+_design/icon/_*.png
+_design/icon/contact_sheet.png
+
+# ── Re-include the app SOURCE the repo-root extension-ignores would otherwise drop ──────────────
+!*.html
+!*.json
+!src-tauri/icons/**
+
+# ── macOS AppleDouble + Finder cruft — re-ignored LAST so the negations above never readmit a
+#    ._*.json / ._*.html / ._*.png sibling the exFAT drive scatters everywhere ──────────────────
+._*
+.DS_Store

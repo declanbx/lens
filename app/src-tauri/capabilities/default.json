@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Lens main window: core IPC for the read-only index commands (list_page, search, get_entry, facets, reveal_in_finder, copy_path) + reindex (spawns the canonical repo_index indexer to refresh INDEX.sqlite, then reopens it read-only) + the multi-project commands (list/current/add/switch/remove/index_project) + the repoindex:// preview scheme. Plugins: tauri-plugin-dialog (dialog:default → folder picker for 'Add folder…') and tauri-plugin-drag (drag:default → native file drag-out of a row onto Finder/other apps). core:path:default lets the frontend resolveResource() the bundled fallback drag icon. No Tauri sidecar.",
+  "windows": ["main"],
+  "permissions": ["core:default", "core:window:allow-start-dragging", "core:path:default", "dialog:default", "drag:default"]
+}

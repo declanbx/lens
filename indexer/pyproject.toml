@@ -1,0 +1,46 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "repo_index"
+version = "0.1.0"
+description = "Mature, self-healing index of a large scientific repository (human HTML map + machine JSON/JSONL + terse agent map). Stdlib-only core; every third-party lib is an optional enhancer."
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name = "Single-cell RNA-seq 2026 project" }]
+keywords = ["index", "metadata", "h5ad", "single-cell", "repository", "self-healing"]
+
+# ZERO required runtime dependencies: the core walk + JSON/JSONL/HTML/agent-map/
+# crosslinks pipeline is STDLIB-ONLY (CONTRACTS.md §0). Third-party libraries are
+# OPTIONAL enhancers behind guarded try-imports; install the `full` extra to get
+# richer extraction (h5ad/h5 via h5py, parquet via pyarrow, yaml via pyyaml).
+dependencies = []
+
+[project.optional-dependencies]
+full = [
+  "h5py>=3",        # .h5ad + .h5 structural metadata (attrs/keys/shapes only)
+  "pyarrow>=8",     # .parquet footer metadata
+  "pyyaml>=5",      # richer .yaml parsing (stdlib key-scan fallback otherwise)
+  "numpy>=1.20",    # nicer .npy dtype handling (stdlib header parse works without)
+]
+app = [
+  "pywebview>=4",   # always-open native window (`repo_index app`); NOT a hard dep
+]
+test = [
+  "pytest>=7",
+]
+
+[project.scripts]
+repo_index = "repo_index.cli:main"
+repo-index = "repo_index.cli:main"
+
+[tool.setuptools]
+# The importable package lives at tools/repo_index/repo_index/.
+packages = ["repo_index", "repo_index.extractors"]
+include-package-data = true
+
+[tool.setuptools.package-data]
+# Ship defaults.yaml inside the wheel so load_config finds it via the package.
+repo_index = ["defaults.yaml"]

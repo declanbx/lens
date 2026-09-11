@@ -1,0 +1,150 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/single-cell-rnaseq-2026/repo_index/index_schema.json",
+  "title": "repo_index INDEX.json",
+  "description": "Schema for the top-level INDEX.json artifact emitted by repo_index. See tools/repo_index/CONTRACTS.md sections 5.1 and 5.2.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "generated_at",
+    "root",
+    "git_commit",
+    "tool_version",
+    "content_digest",
+    "config_used",
+    "summary",
+    "entries"
+  ],
+  "properties": {
+    "schema_version": { "type": "string", "const": "1.0" },
+    "generated_at": {
+      "type": "string",
+      "description": "ISO-8601 UTC timestamp. VOLATILE: excluded from content_digest."
+    },
+    "root": { "type": "string", "description": "Absolute root path that was indexed." },
+    "git_commit": {
+      "type": ["string", "null"],
+      "description": "Current HEAD sha at runtime, or null for a non-git root. VOLATILE: excluded from content_digest."
+    },
+    "tool_version": { "type": "string", "description": "repo_index.__version__." },
+    "content_digest": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$",
+      "description": "sha256 over the canonical, path-sorted [(path,size_bytes,extractor,meta)] serialization EXCLUDING volatile fields (generated_at, git_commit, mtime_iso, error). CONTRACTS.md section 7."
+    },
+    "config_used": {
+      "type": "object",
+      "description": "Resolved configuration echoed for reproducibility (prune set, thresholds, category map, ontology tags)."
+    },
+    "summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "total_files",
+        "total_bytes",
+        "by_category",
+        "by_ext",
+        "n_symlinks",
+        "n_broken_symlinks",
+        "n_errors"
+      ],
+      "properties": {
+        "total_files": { "type": "integer", "minimum": 0 },
+        "total_bytes": { "type": "integer", "minimum": 0 },
+        "by_category": {
+          "type": "object",
+          "additionalProperties": { "type": "integer", "minimum": 0 }
+        },
+        "by_ext": {
+          "type": "object",
+          "additionalProperties": { "type": "integer", "minimum": 0 }
+        },
+        "n_symlinks": { "type": "integer", "minimum": 0 },
+        "n_broken_symlinks": { "type": "integer", "minimum": 0 },
+        "n_errors": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "entries": {
+      "type": "array",
+      "description": "Per-file entries, sorted by path. Same object shape as each INDEX.jsonl line.",
+      "items": { "$ref": "#/$defs/entry" }
+    }
+  },
+  "$defs": {
+    "entry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "path",
+        "category",
+        "ext",
+        "size_bytes",
+        "mtime_iso",
+        "is_symlink",
+        "symlink_target",
+        "symlink_ok",
+        "extractor",
+        "tags",
+        "meta"
+      ],
+      "properties": {
+        "path": {
+          "type": "string",
+          "description": "POSIX-style RELATIVE path from root."
+        },
+        "category": {
+          "type": "string",
+          "enum": [
+            "code",
+            "data_matrix",
+            "data_table",
+            "config",
+            "doc",
+            "notebook",
+            "figure",
+            "model",
+            "log",
+            "archive",
+            "other"
+          ]
+        },
+        "ext": {
+          "type": "string",
+          "description": "Lowercased extension key (compound-aware, e.g. 'csv.gz'); empty string if none."
+        },
+        "size_bytes": { "type": "integer", "minimum": 0 },
+        "mtime_iso": {
+          "type": "string",
+          "description": "ISO-8601 UTC mtime. VOLATILE: excluded from content_digest."
+        },
+        "is_symlink": { "type": "boolean" },
+        "symlink_target": {
+          "type": ["string", "null"],
+          "description": "os.readlink(path) verbatim; null if not a symlink."
+        },
+        "symlink_ok": {
+          "type": ["boolean", "null"],
+          "description": "null if not a symlink; true if target resolves; false if broken/dangling (health signal)."
+        },
+        "extractor": {
+          "type": "string",
+          "description": "Extractor.name that handled this file (incl. 'generic')."
+        },
+        "tags": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Ontology tags from config regexes over the relative path; may be empty."
+        },
+        "meta": {
+          "type": "object",
+          "description": "Extractor return dict (CONTRACTS.md section 4); possibly empty. Shape varies by extractor; intentionally not constrained here."
+        },
+        "error": {
+          "type": "string",
+          "description": "extract_meta error string ('ExcType: message'). OMITTED when extraction succeeded."
+        }
+      }
+    }
+  }
+}

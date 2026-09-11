@@ -1,0 +1,152 @@
+# repo_index default configuration (CONTRACTS.md §3/§6/§9).
+# Intentionally FLAT enough that a stdlib fallback parser in config.py can read
+# it without pyyaml. pyyaml is used when present.
+
+schema_version: "1.0"
+
+# Output directory basename, created under --root unless --out overrides.
+# Visible (not dot-hidden) so it shows in Finder / `ls` without extra flags.
+out_dirname: "_repo_index"
+
+# Directories removed from os.walk dirnames BEFORE descending (CONTRACTS.md §9).
+prune_dirs:
+  - _vendor
+  - __pycache__
+  - .pytest_cache
+  - .git
+  - site-packages
+  - node_modules
+  - .venv
+  - venv
+  - .mypy_cache
+  - .ipynb_checkpoints
+  - .ruff_cache
+  - .eggs
+  - build
+  - dist
+  - .repo_index          # legacy out-dir basename (back-compat): never index our own output
+  - _repo_index          # the OUT dir basename: never index our own output
+  - .cache               # XDG/HTTP response caches (e.g. geneinfo .cache): churning junk, never index
+
+# Basename prefixes skipped entirely (macOS AppleDouble). MANDATORY (CONTRACTS §9).
+skip_prefixes:
+  - "._"
+
+# Performance gates (bytes). CONTRACTS.md §6.
+csv_rowcount_max_bytes: 104857600     # 100 MB raw csv/tsv -> exact row count
+csvgz_rowcount_max_bytes: 26214400    # 25 MB compressed csv.gz/tsv.gz
+json_parse_max_bytes: 5242880         # 5 MB json -> parse; else size-only
+code_parse_max_bytes: 5242880         # 5 MB .py/.R/.sh/.md -> parse; else size-only
+
+# Incremental "racy" dirty window (seconds). A cached entry whose file mtime is
+# within this window of the PRIOR index's own generation time is re-extracted
+# rather than cache-reused, closing the same-coarse-tick/same-size blind spot of
+# low-resolution filesystem timestamps (exFAT 2s mtime granularity). Mirrors the
+# git index-format "racy" fix / Mercurial dirstate-v2 MTIME_SECOND_AMBIGUOUS.
+racy_window_seconds: 2
+
+# W6 (Axis A): thread-pool size for parallel per-directory LISTING + child
+# classification during the walk (the dominant exFAT I/O cost). Extraction
+# (extract_meta -> h5py/pyarrow) is NOT thread-safe and ALWAYS runs serially on
+# the main thread regardless of this value. <= 1 uses the serial recursion
+# unchanged. 4 matched a ~2.23x directory-I/O speedup on this USB/exFAT volume;
+# >= 8 regressed (the bus saturates), so the small pool is intentional.
+walk_threads: 4
+
+# Capture the wide per-CSV/TSV/parquet `columns` list on each tabular entry's
+# meta. True (default) = current behavior. Set false (or pass --no-columns) to
+# DROP that list — a FILE-SIZE / build-speed lever that shrinks INDEX.json/.jsonl
+# (~37% / ~21.5MB on this repo). The `n_columns` COUNT is ALWAYS kept, as are the
+# tiny, search-critical h5ad obs_columns / var_columns. The strip is applied
+# centrally in the walker (not the extractor), and flipping this forces a full
+# re-extract so columns actually come back / get stripped. Trade-off while off:
+# wide-table column-NAME search (page haystack / `grep INDEX.jsonl`) stops working
+# until you re-index with --columns. Must stay a flat top-level scalar (the stdlib
+# YAML fallback only parses top-level key: scalar). CONTRACTS.md §4.4.
+index_columns: true
+
+# Agent map controls (CONTRACTS.md §8).
+agent_map_top_n_h5ad: 25
+label_obs_substrings:
+  - leiden
+  - label
+  - type
+  - annotation
+
+# Optional path filters (fnmatch over the relative POSIX path). Empty = no
+# filtering. --include / --exclude CLI flags populate these. Exclude wins, and an
+# excluded directory subtree is pruned before descent.
+include_globs: []
+exclude_globs: []
+
+# Extension -> category map (CONTRACTS.md §3). Compound csv.gz/tsv.gz precede gz.
+ext_to_category:
+  py: code
+  R: code
+  r: code
+  sh: code
+  cpp: code
+  c: code
+  h5ad: data_matrix
+  h5: data_matrix
+  npy: data_matrix
+  npz: data_matrix
+  loom: data_matrix
+  csv: data_table
+  tsv: data_table
+  csv.gz: data_table
+  tsv.gz: data_table
+  parquet: data_table
+  xlsx: data_table
+  yaml: config
+  yml: config
+  toml: config
+  json: config
+  ini: config
+  md: doc
+  txt: doc
+  rst: doc
+  ipynb: notebook
+  png: figure
+  pdf: figure_pdf
+  svg: figure
+  jpg: figure
+  jpeg: figure
+  pkl: model
+  pt: model
+  pth: model
+  joblib: model
+  model: model
+  rds: model
+  onnx: model
+  log: log
+  out: log
+  err: log
+  gz: archive
+  tgz: archive
+  zip: archive
+  tar: archive
+# Everything unmatched (incl. no-extension, cloupe, docx, pptx) -> "other".
+
+# Ontology tags: each {tag, pattern} applies a regex to the relative POSIX path
+# and adds `tag` to the entry's tags list when it matches (CONTRACTS.md §5.1).
+# Patterns are applied case-insensitively (re.IGNORECASE) by config.py.
+ontology_tags:
+  # --- cohort / dataset ---
+  - {tag: d70, pattern: "d70"}
+  - {tag: d100, pattern: "d100"}
+  - {tag: pasca_hcs, pattern: "pasca_hcs"}
+  - {tag: qian, pattern: "qian"}
+  - {tag: braun, pattern: "braun"}
+  - {tag: hnoca, pattern: "hnoca"}
+  # --- pipeline phase ---
+  - {tag: phase3, pattern: "phase3"}
+  - {tag: phase4, pattern: "phase4"}
+  - {tag: cascade_v3, pattern: "cascade_v3"}
+  # --- package ---
+  - {tag: popv_v4, pattern: "popv_v4"}
+  - {tag: popv_v5, pattern: "popv_v5"}
+  # --- status / legacy ---
+  - {tag: legacy, pattern: "leiden_2\\.0|legacy|stale|_archived"}
+  # --- canonical / important ---
+  - {tag: canonical, pattern: "leiden_cosine_2\\.0|important_assets"}
