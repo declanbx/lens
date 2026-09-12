@@ -3,7 +3,7 @@
 The detailed sheet. Plain language, honest limits, and every number carrying what it counts. For
 installing and running the app, see [`README.md`](README.md).
 
-The numbers throughout come from the folder Lens was built against: **112,634 files, 1.40 TB**.
+The numbers throughout come from the folder Lens was built against: **113,444 files, 1.40 TB**.
 
 ---
 
@@ -17,8 +17,9 @@ contributes its shape and the names of its annotation columns; a spreadsheet con
 names and its row count; a figure drawn as SVG contributes the words printed on it.
 
 Searching and browsing then run entirely against that catalogue, which is why they are instant and
-why they do not touch your drive. On the 1.40 TB folder above, the catalogue comes to about 0.6 GB —
-roughly 0.04% of the data it describes.
+why they do not touch your drive. On the 1.40 TB folder above, the catalogue database comes to
+193 MB — 0.014% of the data it describes, or about 388 MB counting the companion exports written
+beside it.
 
 Your files are never written to, moved, renamed or deleted. Lens has no way to do any of those
 things (see §9), and the window is not permitted to reach the network at all — its content policy
@@ -119,7 +120,7 @@ a spreadsheet, and SVG figure text is read from the whole file.
 
 #### Spreadsheets — `.csv`, `.tsv`, `.csv.gz`, `.tsv.gz`
 
-*26,538 CSVs out of 112,634 files indexed — the single largest file type in the reference folder.*
+*26,781 CSVs out of 113,444 files indexed — the single largest file type in the reference folder.*
 
 **Column names: yes, in full, and they are searchable.** Lens reads the first line of the file, works
 out whether the separator is a comma or a tab, and parses the header. Every column name goes into the
@@ -148,7 +149,7 @@ Where it stops:
 
 Column names with their types, the total row count and the number of row groups, all read from the
 file's footer — no data pages are touched. **Needs `pyarrow`**; without it a `.parquet` file gets
-name, size and date only. *486 parquet files in the reference folder.*
+name, size and date only. *492 parquet files in the reference folder.*
 
 #### `.xlsx` — Excel
 
@@ -190,13 +191,13 @@ Shapes, never values. Also needs `h5py`, with the same silent degradation. *180 
 Shape, numeric type and storage order, read from the array's header bytes. For a `.npz` bundle, Lens
 opens the zip and reads only the leading header bytes of each member — nothing is decompressed, and a
 member it cannot parse is left out rather than turned into an error. This one works whether or not
-NumPy is installed. *408 `.npy` and 1,503 `.npz` files.*
+NumPy is installed. *412 `.npy` and 1,504 `.npz` files.*
 
 ---
 
 #### JSON, YAML and TOML
 
-*8,486 JSON files out of 112,634.*
+*8,666 JSON files out of 113,444.*
 
 **Top-level keys only. Values are never recorded, and nested keys are never walked.**
 
@@ -222,7 +223,7 @@ embedded images have been saved, is not opened at all. *17 notebooks in the refe
 
 #### Markdown — `.md`
 
-*3,235 files.* The first `#` heading, the first paragraph of prose (fenced code blocks are skipped
+*3,263 files.* The first `#` heading, the first paragraph of prose (fenced code blocks are skipped
 over), and the list of paths the document links to. **There is no heading outline and no body text
 beyond that first paragraph.** Over 5 MB, nothing is read.
 
@@ -233,7 +234,7 @@ of that detection will find much less.
 
 #### Code — `.py`, `.R`, `.sh`
 
-*9,523 Python, 621 R, 318 shell.* Parsed, **never executed**.
+*9,619 Python, 647 R, 318 shell.* Parsed, **never executed**.
 
 - **Python:** the first line of the module docstring, plus the names of the top-level functions,
   classes and imported packages. **Top level only** — a function defined inside a class or inside
@@ -249,7 +250,7 @@ of that detection will find much less.
 
 #### SVG figures — the one place text inside a file is read
 
-*5,803 SVGs.* Lens pulls the words out of the figure: axis labels, tick labels, legend entries,
+*5,832 SVGs.* Lens pulls the words out of the figure: axis labels, tick labels, legend entries,
 titles, gene symbols.
 
 It handles **both** ways plotting libraries write text. The easy one is real text elements. The hard
@@ -266,28 +267,31 @@ Where it stops:
   quarters, because matplotlib writes the axis text *after* the plot data — reading only the start of
   a big figure would find nothing;
 - **figure text is deliberately kept out of the default search.** It is a large, noisy surface, so it
-  sits behind the **figure text** checkbox next to the search box. With the box off, searching behaves
-  exactly as it did before the feature existed.
+  sits behind the **figure text** checkbox next to the search box, and the box is **off by default**.
+  It is stored separately too: 3.95 MB of figure text, against 28.9 MB in the ordinary search text.
+  With the box off, searching behaves exactly as it did before the feature existed.
+- **The gap that hides is larger than it sounds.** Measured on this index: the gene symbol `HMGCR` is
+  found by the default search in **20** files — and in **134 further files** it appears only as text
+  drawn inside a figure, reachable only with the box ticked. A search that finds nothing, or
+  suspiciously little, is worth repeating with **figure text** on.
 
 #### PNG, JPEG, PDF and everything else
 
-*8,877 PNGs, 7,094 JPEGs, 1,344 PDFs.* Name, size, date and category. **No width or height, no colour
+*8,907 PNGs, 7,094 JPEGs, 1,344 PDFs.* Name, size, date and category. **No width or height, no colour
 depth, no EXIF, no PDF text.**
 
 That is not a small hole, and it is worth seeing at scale: figures are the second-largest category in
-the reference folder at **21,774 files**, and only the **5,803** of them that are SVG give up anything
-at all.
+the reference folder at **21,833 files**, and only the **5,832** of them that are SVG give up anything
+at all — and even those go into a separate store that the default search does not read.
 
-The same applies to plain text (`.txt` — **14,444 files**, the second largest single type), `.rst`,
+The same applies to plain text (`.txt` — **14,538 files**, the second largest single type), `.rst`,
 `.ini`, pickles and saved models, logs, archives, Word and PowerPoint documents, and the **2,697**
 files that have no extension at all. They are catalogued, findable by name, and nothing is read from
 inside them.
 
-**The honest total: 52,151 of the 112,634 files — 46.3% — were handled by the fallback reader, which
-takes nothing.** Counting files that ended with no extracted detail for any reason (fallback,
-size limit, or a missing optional package) brings it to 52,214, or 46.4%. Just over half of a real
-research folder gets described in depth; the rest is findable by name, path and date alone. That
-ratio is worth knowing before you go looking for something.
+**The honest total: 52,331 of the 113,444 files — 46.1% — ended with nothing beyond name, size and
+date.** Just over half of a real research folder gets described in depth; the rest is findable by
+name, path and date alone. That ratio is worth knowing before you go looking for something.
 
 ---
 
@@ -307,7 +311,9 @@ File names, the full path (so a folder name matches everything beneath it), and 
 and import names, markdown titles and opening paragraphs, the category, the extension, the tags.
 
 **Not the text inside files.** No CSV cell, no PDF page, no notebook cell, no document body, no
-source-code line is searched. The one exception is SVG figure text, behind its checkbox.
+source-code line is searched. The one exception is SVG figure text — and it is not in the default
+search either: it lives in its own store behind the **figure text** checkbox, which is off until you
+tick it (§3 has the measured size of that gap).
 
 ### How results are ordered
 
@@ -471,34 +477,34 @@ And, as in §5, the graph is only rebuilt by a full re-index and does not refres
 
 ## 8. The numbers
 
-Lens was built and measured against a real working folder: **112,634 files, 1.40 TB**, with
+Lens was built and measured against a real working folder: **113,444 files, 1.40 TB**, with
 **571 symlinks** (20 broken) and **0 extraction errors** in the run these figures come from.
-**60,420 of those files (53.6%) had something read out of them beyond name, size and date; the
-other 52,214 (46.4%) did not** — see the end of §3 for why.
+**61,113 of those files (53.9%) had something read out of them beyond name, size and date; the
+other 52,331 (46.1%) did not** — see the end of §3 for why.
 
-![Composition of the reference folder: 112,634 files across twelve categories, and the extensions
+![Composition of the reference folder: 113,444 files across twelve categories, and the extensions
 that dominate it, each shown twice — once by how many files it holds and once by how many
 bytes.](docs/figures/corpus_composition.png)
 
-*The point of this figure is that counting files and counting bytes give opposite answers. The 26,538
-CSVs are the largest population of files — 23.6% of them — and 6.3% of the 1.40 TB. The 2,521 data
-matrices are 2.2% of the files and **71.7% of the bytes**; the 430 `.h5ad` files alone are 58.4% of
+*The point of this figure is that counting files and counting bytes give opposite answers. The 26,781
+CSVs are the largest population of files — 23.6% of them — and 6.3% of the 1.40 TB. The 2,526 data
+matrices are 2.2% of the files and **71.7% of the bytes**; the 430 `.h5ad` files alone are 58.3% of
 the total. Whichever way you look at this folder, you are looking at a different folder.*
 
 The largest slices, and what Lens gets from each:
 
 | Slice | Files | What is recorded beyond name, size and date |
 |---|---:|---|
-| `.csv` | 26,538 | column names, exact row count up to 100 MB |
-| `.txt` | 14,444 | nothing |
-| `.py` | 9,523 | docstring first line, top-level functions, classes, imports |
-| `.gz` (archives) | 8,910 | nothing |
-| `.png` | 8,877 | nothing |
-| `.json` | 8,486 | top-level key names, up to 5 MB |
+| `.csv` | 26,781 | column names, exact row count up to 100 MB |
+| `.txt` | 14,538 | nothing |
+| `.py` | 9,619 | docstring first line, top-level functions, classes, imports |
+| `.gz` (archives) | 8,913 | nothing |
+| `.png` | 8,907 | nothing |
+| `.json` | 8,666 | top-level key names, up to 5 MB |
 | `.jpg` | 7,094 | nothing |
-| `.svg` | 5,803 | the text drawn inside the figure |
-| `.md` | 3,235 | first heading, first paragraph, outgoing links |
-| `.npz` | 1,503 | member names, shapes and types |
+| `.svg` | 5,832 | the text drawn inside the figure, in a store the default search does not read |
+| `.md` | 3,263 | first heading, first paragraph, outgoing links |
+| `.npz` | 1,504 | member names, shapes and types |
 | `.pdf` | 1,344 | nothing |
 | `.h5ad` | 430 | shape, encoding, annotation column names, embeddings, layers |
 
@@ -506,24 +512,24 @@ By category, counted both ways — files, and then share of the 1.40 TB:
 
 | Category | Files | Share of bytes |
 |---|---:|---:|
-| data tables | 30,241 | 10.3% |
-| figures | 21,774 | 1.1% |
-| documents | 17,680 | 0.04% |
-| code | 10,470 | 0.008% |
-| archives | 8,965 | 7.2% |
-| config | 8,611 | 0.2% |
-| other | 8,288 | 4.7% |
-| **data matrices** | **2,521** | **71.7%** |
-| logs | 2,267 | 0.003% |
+| data tables | 30,508 | 10.3% |
+| figures | 21,833 | 1.1% |
+| documents | 17,802 | 0.04% |
+| code | 10,592 | 0.008% |
+| archives | 8,968 | 7.1% |
+| config | 8,790 | 0.2% |
+| other | 8,302 | 4.7% |
+| **data matrices** | **2,526** | **71.7%** |
+| logs | 2,306 | 0.003% |
 | PDF figures | 1,344 | 0.2% |
 | models | 456 | 4.6% |
 | notebooks | 17 | 0.001% |
 
 The speed figures quoted in §4 come from a **different, smaller index of 61,524 files** — the one the
-search work was benchmarked against — and not from the 112,634-file folder above. On that index, the
+search work was benchmarked against — and not from the 113,444-file folder above. On that index, the
 whole catalogue is loaded into the window in one go and turned into its searchable form in about
 24 ms; each keystroke rescans it in 1–4 ms; and the fourth search stage waits 150 ms after you stop
-typing before asking the catalogue. Nothing here has been re-timed at 112,634 files.
+typing before asking the catalogue. Nothing here has been re-timed at 113,444 files.
 
 ---
 
@@ -605,8 +611,9 @@ Nothing is hidden, and nothing is anywhere surprising.
 **Inside the folder you indexed** — a folder named `_repo_index`. It holds the catalogue database and
 its companions: the same catalogue as JSON and as one-record-per-line JSON, a standalone browsable
 HTML version, a short summary for machine readers, the lineage graph, and a small lock file that stops
-two writers from working on the catalogue at once. On the 1.40 TB reference folder this comes to about
-0.6 GB. Deleting it costs you the catalogue and nothing else; the next index rebuilds it from scratch.
+two writers from working on the catalogue at once. On the 1.40 TB reference folder the database itself
+is 193 MB and the whole folder about 388 MB. Deleting it costs you the catalogue and nothing else; the
+next index rebuilds it from scratch.
 
 **In your home Library** — `~/Library/Application Support/com.declan.lens/`. It holds the list of
 folders you have registered and which one was last open, an operation log per folder, your saved

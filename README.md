@@ -1,22 +1,61 @@
 # Lens
 
 Lens is a macOS app that turns a very large research folder into something you can search as fast as
-you can type. It visits every file once and records what it can see without reading the data itself —
-the name, the size, the date, and for the scientific formats it understands, the structure inside: a
-spreadsheet's column names, a single-cell matrix's dimensions and annotation names, a script's
-function names, the words drawn inside a figure. Nothing is copied and nothing is moved; the
-catalogue sits in a folder beside your data and your files are never altered.
+you can type. It catalogues the folder once — visiting every file, opening only its header, never its
+data — and every search after that answers from the catalogue instead of the disk. Nothing is copied,
+moved or altered; the catalogue sits in a folder beside your data.
 
-It was built against a real working folder of **112,634 files and 1.40 TB**, and the numbers
+It was built against a real working folder of **113,444 files and 1.40 TB**, and the numbers
 throughout this documentation come from that folder.
 
-**What a search reaches, in one line:** file names, folder names, and the descriptors above — **not
-the text inside your files.** There is no content search, no PDF text, no spelling tolerance. What
-*is* searched is more than you might expect (every CSV column name, every top-level key of a JSON
-file, every gene symbol printed on an SVG figure) and it does not cover everything: in that 112,634-file
-folder, 53.6% of files had something read out of them beyond name, size and date, and 46.4% did not.
-[`HOW_IT_WORKS.md`](HOW_IT_WORKS.md) is the detailed sheet: what is read from each file type, and
-exactly where each capability stops.
+## What actually gets searched
+
+For every file, Lens builds **one line of text** and searches that line. The line is made of:
+
+> the file's **path** + its **category, extension and which reader handled it** + its **tags** + the
+> **descriptors** pulled out of the file itself
+
+**It does not search the contents of your files.** Not the rows of a spreadsheet, not the body of a
+document, not the text inside a PDF. What goes into that line is names, paths, and a specific,
+limited set of descriptors read from each file's header — nothing more.
+
+Measured over the whole index (28.9 MB of searchable text): the file path makes up **42.3%** of it,
+the extracted descriptors **50.5%**, and category/extension/reader/tags together **7.2%**. Text drawn
+*inside* SVG figures — axis labels, legend entries, gene symbols — lives in a separate 3.95 MB store
+and is searched only when you tick the **figure text** box; it is never part of the default search.
+That box matters more than it looks: the gene symbol `HMGCR` is found in **20** files by the default
+search, and in **134 further files** only as text drawn inside a figure.
+
+**What "descriptors" means depends entirely on the file type**, and for most files it means nothing at
+all:
+
+| File type | What Lens reads | What it never reads |
+|---|---|---|
+| `.h5ad` single-cell matrices | shape (cells × genes), how the matrix is stored, its numeric type, every per-cell and per-gene annotation column name, embedding and layer names *(needs `h5py`)* | the matrix values |
+| Markdown | the first heading and the first paragraph, nothing else | any later heading or paragraph |
+| Python / R / shell scripts | top-level function and class names, imported modules, the first docstring line | anything inside a function body |
+| JSON / YAML / TOML | top-level keys only, and only if the file is under 5 MB | nested keys, and every value |
+| CSV / TSV / parquet | column names and the exact row count — **column names are on by default but can be switched off at index time; with it off, a search by column name finds nothing until the folder is re-indexed with it back on** | any cell value |
+| SVG figures | the words rendered inside the figure | — (see the figure-text box above) |
+| Everything else — **46.1% of files** | name, size and date only | everything inside |
+
+Two concrete examples: typing `padj` finds the result tables whose column headers include `padj` —
+provided column names were switched on when that folder was indexed. Typing `Braak` finds the
+single-cell files that carry a `Braak` annotation, without opening any of them.
+
+## How matching works
+
+Matching is **plain substring, case-insensitive** — typing `umap` finds anything whose line contains
+"umap" anywhere, including in the middle of a word. There is **no typo tolerance** (one wrong letter
+finds nothing), **no wildcards**, **no regular expressions**, **no AND/OR**, and accents are not
+folded (`cafe` will not match `café`). Results are ordered by how many of your words matched, then
+*where* they matched (folder name beats file name beats path beats descriptors), then whether the
+match landed on a word boundary, then your chosen sort column — there is no relevance score. Type and
+category filters combine with whatever text you typed.
+
+**53.9% of files had at least one descriptor extracted beyond name, size and date; 46.1% did not.**
+[`HOW_IT_WORKS.md`](HOW_IT_WORKS.md) is the detailed sheet: exactly what is read from each file type,
+and exactly where each capability stops.
 
 ---
 
@@ -85,8 +124,8 @@ newer**. On 3.9 or 3.10 a `.toml` file yields nothing, even though the rest of L
    each file's front matter, not just listing names — so start it and go and do something else. The
    window reports progress throughout.
 
-   **Measured:** the 1.40 TB, 112,634-file folder above took **10 minutes 11 seconds** for a
-   complete cold pass, over USB to an external SSD — about 185 files a second. A folder of a few
+   **Measured:** the 1.40 TB, 113,444-file folder above took **10 minutes 11 seconds** for a
+   complete cold pass, over USB to an external SSD — about 186 files a second. A folder of a few
    thousand ordinary files is done in seconds. Your own time will track the number of files far more
    than the number of terabytes, because the cost is opening each file's header, not reading it.
 3. After that, re-indexing is cheap. The walk still visits everything, but a file is only re-read if
@@ -100,8 +139,13 @@ above it once you type; a preview and an information panel on the right. The bot
 window counts what is in view against the whole index. `/` jumps to the search box, `↑ ↓` move,
 `⏎` inspects.
 
+One honest note on that information panel: the rows × columns line only appears for matrix files
+like `.h5ad`. For a spreadsheet it shows nothing there, and it never lists column names — even for a
+folder where column names were indexed and are fully searchable.
+
 **Where the catalogue goes:** into a folder named `_repo_index` inside the folder you indexed. On the
-1.40 TB folder above it comes to roughly 0.6 GB — about 0.04% of the data. Deleting it loses the
+1.40 TB folder above the database the app reads is **193 MB** — 0.014% of the data — and the whole
+folder, counting the companion exports written beside it, about 388 MB. Deleting it loses the
 catalogue and nothing else.
 
 **While Lens is open it watches the folder.** New, changed and deleted files appear by themselves, a
