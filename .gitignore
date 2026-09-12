@@ -24,8 +24,14 @@ _repo_index/
 # Local-only: the path to the research-repo working copy (never published).
 .lens-home
 
-# Design + research notes: kept locally, deliberately not published.
+# Design + research notes: kept locally, deliberately not published — EXCEPT the
+# screenshots and figures the README and HOW_IT_WORKS link to, which are product
+# documentation and would otherwise render as broken images.
 docs/
+!docs/screenshots/
+!docs/screenshots/*.png
+!docs/figures/
+!docs/figures/*.png
 HANDOFF.md
 ROADMAP.md
 indexer/tests/test_real_files.py
