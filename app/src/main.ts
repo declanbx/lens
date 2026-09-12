@@ -158,6 +158,39 @@ interface IndexChanged {
   dirs: string[];
 }
 
+/// The four states the live watch can be in, as reported by the backend. A STRING over IPC, so it
+/// is narrowed at the boundary (`asHealth`) rather than trusted — an unknown word must degrade to
+/// something honest, never throw in an event handler.
+///   live        watching, and the folder is readable right now
+///   paused      live updates are parked (the #livebtn hold)
+///   unreachable the folder cannot be read — drive unplugged, renamed or ejected
+///   stopped     there is no watcher at all (read-only degrade mode, or no folder open)
+export type WatchHealth = "live" | "paused" | "unreachable" | "stopped";
+
+/// Reply of `watch_status` (mirrors `lib.rs` `WatchStatus`).
+///
+/// `watching` + `root` are the original pair, and on their own they CANNOT describe the failure
+/// this exists for: the watcher arms its OS-level watch exactly once, so when the drive is
+/// unplugged the watch dies while the watcher OBJECT lives on — `watching` stays true, the window
+/// keeps showing the catalogue it already had, and nothing on disk reaches it again. `health` and
+/// `root_reachable` are what tell those two situations apart; `rearms` counts how many times the
+/// watch has been re-established, which is the only way to see that a folder has been flapping.
+export interface WatchStatus {
+  watching: boolean;
+  root: string;
+  health: string; // one of WatchHealth — narrowed by asHealth()
+  root_reachable: boolean;
+  rearms: number;
+}
+
+/// Payload of the backend "watch-health" event. Emitted ON EVERY TRANSITION of `health` and never
+/// on a timer, so an arriving event always means the state genuinely changed.
+interface WatchHealthEvent {
+  root: string;
+  health: string;
+  rearms: number;
+}
+
 // ── Typed IPC bindings (1:1 onto the #[tauri::command]s) ─────────────────────────────────────
 const api = {
   listPage: (offset: number, limit: number, sort: string) =>
@@ -188,6 +221,10 @@ const api = {
   copyPath: (path: string, kind: "abs" | "rel" | "posix" | "file_uri") =>
     invoke<string>("copy_path", { path, kind }),
   reindex: () => invoke<ReindexReport>("reindex"),
+  // The live watch's own state. Already on the backend before this window ever asked — which was
+  // the problem: a status nobody calls cannot warn anybody. Polled at boot and after every project
+  // switch; between those, the "watch-health" event does the talking.
+  watchStatus: () => invoke<WatchStatus>("watch_status"),
   // Multi-project surface (Phase-2 UI). The backend keeps EXACTLY ONE project resident; switch
   // repoints the single connection. `add_project` only registers (caller indexes + switches).
   listProjects: () => invoke<Project[]>("list_projects"),
@@ -2259,24 +2296,144 @@ let liveHeld = (() => {
 })();
 let liveHeldPending = 0; // flushes that arrived while held (coalesced — one reload clears them all)
 
+// ── WATCH HEALTH (what the pill is actually reporting) ───────────────────────────────────────
+// The pill used to report ONE thing: whether the user had parked live updates. That is the only
+// state it could report, because nothing ever asked the backend how the watch itself was doing —
+// and the watch arms its OS-level watch exactly once, at startup. Unplug the drive this app's data
+// normally lives on and that watch dies; replug it and nothing re-establishes it. The window keeps
+// running, keeps showing the catalogue it already had, and silently stops noticing the disk. With
+// no indicator there was no way to tell that apart from a quiet afternoon — the window was lying.
+//
+// So the pill now reports the BACKEND's health, with one local overlay: the hold switch is a
+// frontend decision (localStorage), so "the user parked updates" is something only this side can
+// know for certain. Precedence, and the reason for it:
+//   unreachable / stopped  ALWAYS win — a held window and a blind window look identical from the
+//                          outside, and only one of them is a problem the user must act on.
+//   paused                 shown when the backend is otherwise live and the hold is on.
+// State arrives two ways and both land here: `watch_status` (polled at boot and after every project
+// switch) and the "watch-health" event (every transition, never a timer).
+// Until the first answer lands this claims "live", which is exactly what the pill said before it
+// could ask: at boot the catalogue has just been read, so the window IS current at that instant.
+// Starting at "stopped" would be its own small lie, told before anyone had been asked.
+let watchHealth: WatchHealth = "live";
+let watchRoot = ""; // the folder the health above is ABOUT — the tooltip names it
+let watchRootReachable = true;
+let watchRearms = 0;
+
+/// Narrow the wire string. An unrecognised value is not a crash and not a guess: fall back to the
+/// old boolean's meaning, which is the most this window can honestly claim to know.
+function asHealth(word: string | undefined, watching: boolean | undefined): WatchHealth {
+  switch (word) {
+    case "live":
+    case "paused":
+    case "unreachable":
+    case "stopped":
+      return word;
+    default:
+      return watching === true ? "live" : "stopped";
+  }
+}
+
+/// What the pill should SAY, given the backend's health and the local hold. Kept separate from the
+/// painting so the precedence rule above is one readable expression rather than a nest of ifs.
+function effectiveHealth(): WatchHealth {
+  if (watchHealth === "unreachable" || watchHealth === "stopped") return watchHealth;
+  return liveHeld ? "paused" : watchHealth;
+}
+
+/// The folder's short name, for prose ("FieldDrive"). The FULL path goes on its own line at the
+/// end of the tooltip and never in a sentence — the person reading this is a scientist looking for
+/// their files, not a programmer reading a log.
+function watchFolderName(): string {
+  const base = basename(watchRoot.replace(/\/+$/, ""));
+  return base === "" ? "this folder" : base;
+}
+
 function paintLiveBtn(): void {
   const btn = document.getElementById("livebtn");
   const label = document.getElementById("livelabel");
   if (!btn || !label) return;
-  btn.classList.toggle("held", liveHeld);
+  const health = effectiveHealth();
+
+  // The state is carried by the LABEL TEXT and the aria-label, never by the dot colour alone.
+  btn.classList.toggle("held", health === "paused");
+  btn.classList.toggle("watch-unreachable", health === "unreachable");
+  btn.classList.toggle("watch-stopped", health === "stopped");
+  // aria-pressed describes the HOLD switch (what the click does), which is still what this button
+  // is; the health goes in aria-label, where it does not pretend to be a toggle position.
   btn.setAttribute("aria-pressed", liveHeld ? "true" : "false");
-  if (!liveHeld) {
-    label.textContent = "Live";
-    btn.title = "Live updates on — the window follows the index. Click to hold them.";
-    return;
+
+  // A folder Lens cannot reach, but which is not the headline state, is still worth one sentence —
+  // "updates are off" and "your drive is gone" are not the same news.
+  const alsoGone =
+    health !== "unreachable" && watchRoot !== "" && !watchRootReachable
+      ? `\nLens also cannot reach ${watchFolderName()} at the moment.`
+      : "";
+  const where = watchRoot === "" ? "" : `\nFolder: ${watchRoot}`;
+
+  switch (health) {
+    case "unreachable": {
+      // The one state where the window would otherwise look completely normal while being wrong.
+      // \uFE0E forces the TEXT presentation of ⚠ — without it WebKit renders it as a colour
+      // emoji, which is both off-palette and the one glyph on the bar that ignores the theme.
+      // The mark matters: it is the redundancy that makes this state readable without colour.
+      label.textContent = "\u26a0\ufe0e Folder missing";
+      btn.title =
+        `Lens cannot reach ${watchFolderName()} right now, so this list has stopped updating and may ` +
+        `already be out of date.\nReconnect the drive, or put the folder back, and Lens will catch up ` +
+        `on its own.${where}`;
+      btn.setAttribute(
+        "aria-label",
+        "Problem: Lens cannot reach the folder, so this list has stopped updating and may be out of date.",
+      );
+      return;
+    }
+    case "stopped": {
+      // Calm on purpose: the ordinary cause is a second copy of Lens holding the folder, which is
+      // not a fault and not something to shout about.
+      label.textContent = "Updates off";
+      btn.title =
+        watchRoot === ""
+          ? "No folder is open, so there is nothing to keep up with yet."
+          : `Lens is not watching ${watchFolderName()} for changes, so new files will not appear on ` +
+            `their own. This is normal when a second Lens window already has the folder open.\nUse the ` +
+            `refresh button to check for new work.${alsoGone}${where}`;
+      btn.setAttribute(
+        "aria-label",
+        "Live updates are off. New files will not appear on their own; use the refresh button.",
+      );
+      return;
+    }
+    case "paused": {
+      // Name the number, not just the state: "Held" alone cannot tell you whether you are looking at
+      // a stale window or simply a quiet one.
+      label.textContent = liveHeldPending > 0 ? `Held · ${liveHeldPending}` : "Held";
+      btn.title =
+        (liveHeldPending > 0
+          ? `${liveHeldPending} index update${liveHeldPending === 1 ? "" : "s"} waiting — click to apply`
+          : "Live updates held — the window will not reload on disk changes. Click to resume.") +
+        alsoGone;
+      btn.setAttribute(
+        "aria-label",
+        liveHeldPending > 0
+          ? `Live updates held. ${liveHeldPending} update${liveHeldPending === 1 ? "" : "s"} waiting. Click to apply.`
+          : "Live updates held. Click to resume following the folder.",
+      );
+      return;
+    }
+    default: {
+      label.textContent = "Live";
+      // A watch that has had to be re-established is worth saying once: a folder that keeps
+      // dropping out is a hardware story the user can act on, and it is invisible otherwise.
+      const recovered =
+        watchRearms > 0
+          ? `\nLens has reconnected to this folder ${watchRearms === 1 ? "once" : `${watchRearms} times`} since it was opened.`
+          : "";
+      btn.title =
+        `Live updates on — the window follows the index. Click to hold them.${recovered}` + alsoGone;
+      btn.setAttribute("aria-label", "Live updates on. This list is following changes in the folder.");
+    }
   }
-  // Name the number, not just the state: "Held" alone cannot tell you whether you are looking at
-  // a stale window or simply a quiet one.
-  label.textContent = liveHeldPending > 0 ? `Held · ${liveHeldPending}` : "Held";
-  btn.title =
-    liveHeldPending > 0
-      ? `${liveHeldPending} index update${liveHeldPending === 1 ? "" : "s"} waiting — click to apply`
-      : "Live updates held — the window will not reload on disk changes. Click to resume.";
 }
 
 function setLiveHeld(held: boolean): void {
@@ -2296,8 +2453,113 @@ function setLiveHeld(held: boolean): void {
 }
 
 function wireLiveButton(): void {
-  document.getElementById("livebtn")?.addEventListener("click", () => setLiveHeld(!liveHeld));
+  document.getElementById("livebtn")?.addEventListener("click", () => {
+    setLiveHeld(!liveHeld);
+    // In the two states where the pill is REPORTING a fault rather than showing a switch position,
+    // the hold still flips (it is a remembered preference that matters again the moment the folder
+    // comes back) but nothing on the pill moves. Say where the setting landed, so the click is not
+    // simply swallowed.
+    if (watchHealth === "unreachable" || watchHealth === "stopped") {
+      flashStatus(
+        liveHeld
+          ? "live updates held · nothing to follow right now"
+          : "live updates on · nothing to follow right now",
+      );
+    }
+  });
   paintLiveBtn();
+}
+
+/// Take one new reading of the watch, repaint, and — only on a genuine change — say so in the
+/// status line. Both sources (the poll and the event) funnel through here so the transition rules
+/// live in exactly one place.
+function applyWatchHealth(
+  next: WatchHealth,
+  root: string,
+  rearms: number,
+  rootReachable: boolean,
+): void {
+  const prev = watchHealth;
+  watchHealth = next;
+  watchRoot = root;
+  watchRearms = rearms;
+  watchRootReachable = rootReachable;
+  paintLiveBtn();
+  if (next === prev) return;
+
+  if (prev === "unreachable" && next === "live") {
+    // The backend forces a whole-tree rescan when the folder comes back, and the existing
+    // `index-changed` handler repaints off it — so the list fixes itself. Silently, though, which
+    // from the user's side is indistinguishable from the failure they were just looking at. One
+    // line in the status bar is the difference between "it recovered" and "did it recover?".
+    flashStatus(
+      liveHeld
+        ? "folder reconnected · updates still held"
+        : "folder reconnected · bringing the list up to date",
+    );
+  } else if (next === "unreachable") {
+    // Said once, here, for the person who is looking at the file list rather than at the pill. The
+    // pill keeps saying it afterwards, which is the part that has to persist.
+    flashStatus("can't reach the folder · this list has stopped updating");
+  }
+}
+
+/// Ask the backend outright. Called at boot and after every project switch — the two moments where
+/// there is no transition to listen for because the thing being watched has just changed.
+async function refreshWatchHealth(): Promise<void> {
+  try {
+    const st = await api.watchStatus();
+    applyWatchHealth(
+      asHealth(st.health, st.watching),
+      st.root ?? "",
+      st.rearms ?? 0,
+      st.root_reachable ?? true,
+    );
+  } catch (e) {
+    // Leave the pill exactly as it was. A failed status call says the backend is unwell; it does
+    // not say the watch is dead, and painting "Folder missing" off a failed question would be a
+    // second, louder lie than the one this whole feature exists to stop.
+    console.error("[lens] watch_status failed:", e);
+  }
+}
+
+/// The "watch-health" subscription. ONE per window, for the window's lifetime — a project switch
+/// reuses the same webview, so re-subscribing on each switch is how a listener leak starts (the
+/// `index-changed` subscription is single for the same reason).
+let watchHealthUnlisten: UnlistenFn | null = null;
+
+async function wireWatchHealth(): Promise<void> {
+  if (watchHealthUnlisten) return; // already subscribed — never stack a second one
+  try {
+    watchHealthUnlisten = await listen<WatchHealthEvent>("watch-health", (ev) => {
+      // A switch stops one watcher and starts another, so it emits transitions for BOTH the folder
+      // being left and the one arriving, in that order — painting them would flicker the pill
+      // through a state the user is not in. `teardownAndReload` polls the truth at the end of every
+      // switch, so the honest thing here is to say nothing until it has.
+      if (projectBusy) return;
+      // Otherwise filter on the root the last STATUS reply named, NOT on activeProjectRoot: the
+      // label is repainted a step after the reload, so a filter built on it is briefly one folder
+      // behind — and `watchRoot` comes from the very reply that names the active folder.
+      if (watchRoot !== "" && ev.payload.root !== watchRoot) return;
+      const health = asHealth(ev.payload.health, undefined);
+      // The event carries no reachability flag of its own, so infer the only thing it can honestly
+      // support: "unreachable" means the folder is gone, anything else means assume it is there.
+      // A poll is what can report "watching stopped AND the folder is missing" together.
+      applyWatchHealth(health, ev.payload.root, ev.payload.rearms ?? 0, health !== "unreachable");
+    });
+    // Tauri keeps the webview alive across project switches, so this is the only teardown there is:
+    // a reload or a window close must not leave the handler registered on the Rust side.
+    window.addEventListener(
+      "pagehide",
+      () => {
+        watchHealthUnlisten?.();
+        watchHealthUnlisten = null;
+      },
+      { once: true },
+    );
+  } catch (e) {
+    console.error("[lens] could not subscribe to watch-health:", e);
+  }
 }
 
 async function runLiveRefresh(): Promise<void> {
@@ -2736,6 +2998,10 @@ async function teardownAndReload(): Promise<void> {
   showPreviewEmpty("Select a file to preview. Images render on the stage; markdown as a document.");
   // 3) Reload the tree/list + types popover from the reopened connection.
   await Promise.all([buildTypesPopover(), loadBrowse()]);
+  // 4) Re-ask how the watch is doing. Every project switch, add and forget runs through here, and
+  //    each one stops one watcher and (usually) starts another — the pill must not keep reporting
+  //    the health of the folder we just left.
+  await refreshWatchHealth();
 }
 
 /// Re-read the active project from the backend and paint its name on the trigger label.
@@ -3430,6 +3696,12 @@ async function boot(): Promise<void> {
   // watcher's own startup reconcile has already run by then, and any change we miss in that gap
   // lands on the next flush.
   void wireLiveIndex();
+
+  // The watch's own health: subscribe to the transitions first, then take one reading for the
+  // state we were already in when the window opened (a transition-only feed cannot tell you that —
+  // a folder that was unplugged before launch never transitions).
+  await wireWatchHealth();
+  await refreshWatchHealth();
 
   console.info("[lens] mounted; total entries =", state.total);
 }

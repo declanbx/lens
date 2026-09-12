@@ -41,8 +41,14 @@
            facet chip (#filters): .filterchip[.on/.off] (g + lbl + cnt), --cc per category.
            #filters is position:FIXED and re-anchored to #typesbtn by main.ts anchorTypesPopover()
                         on open/scroll/resize — absolute would ride the scroller away from its button.
-           #livebtn  : the live-update switch. .tbtn + .livedot; gains .held and the label counts the
-                        withheld watcher flushes ("Held · 3"). State persists in localStorage.
+           #livebtn  : the live-update switch AND the watch-health readout — one control, four states.
+                        .tbtn + .livedot; gains .held (label counts the withheld watcher flushes,
+                        "Held · 3"; persists in localStorage), .watch-unreachable (the folder cannot
+                        be read — the state where the window would otherwise look normal while
+                        silently no longer following the disk) or .watch-stopped (no watcher at all;
+                        normal, e.g. a second Lens window holds the folder). main.ts paints the
+                        label, title and aria-label for every state — colour is never the only
+                        channel. Health comes from the backend's watch_status + "watch-health".
            MODALS    : the ONLY three full-window surfaces are .scrim > .mcard.glass-3 —
                         #welcome (below, static), the "forget this folder" confirm card and the
                         "Lens can't find Python" card (both built by main.ts). Everything else in
@@ -96,10 +102,16 @@
                 <!-- removable chips for every active filter (main.ts paintFilterChrome); the slot
                      doubles as the flex spacer that pushes #refresh to the far right. -->
                 <span class="ctl-flex" id="filterchips"></span>
-                <!-- Live-update switch. The watcher reloads the whole window on every committed
-                     index flush, which yanks the tree out from under a click mid-search; this holds
-                     those reloads (counting them) until you ask for them. -->
+                <!-- Live-update switch, and the only place the watch's own health is visible.
+                     The watcher reloads the whole window on every committed index flush, which yanks
+                     the tree out from under a click mid-search; this holds those reloads (counting
+                     them) until you ask for them. It also answers the question that had no answer
+                     at all before: the OS-level watch is armed once, so unplugging the drive kills
+                     it for good — the pill turns red and says the folder is missing rather than
+                     letting the window go on looking current. The markup below is the LIVE state;
+                     main.ts repaints label + title + aria-label on every transition. -->
                 <button class="tbtn" id="livebtn" aria-pressed="false"
+                        aria-label="Live updates on. This list is following changes in the folder."
                         title="Live updates: the window reloads when files change on disk. Click to hold.">
                   <i class="livedot" aria-hidden="true"></i> <span id="livelabel">Live</span>
                 </button>

@@ -54,7 +54,7 @@ use defer::DeferralRegistry;
 use helper::PyMetaSource;
 use journal::OpLog;
 use reconcile::ReconcileCtx;
-use watcher::WatcherHandle;
+use watcher::{Health, WatcherHandle};
 use writer::IndexWriter;
 // `Manager` → `app.state()`; `Emitter` → `app.emit(...)` (the live index-progress broadcast).
 use tauri::{Emitter, Manager, State};
@@ -84,6 +84,17 @@ struct IndexProgress {
 struct IndexChanged {
     root: String,
     dirs: Vec<String>,
+}
+
+/// Payload for the `watch-health` event — emitted ON EVERY TRANSITION of the watcher's health and
+/// never on a timer (§4.9): the drive went away, the drive came back, the user paused. `rearms` is
+/// the count of times the OS watch has been RE-established, and it is on the payload because it is
+/// the only proof that "live" after an unplug means a live watch rather than a live object.
+#[derive(Clone, serde::Serialize)]
+struct WatchHealth {
+    root: String,
+    health: String,
+    rearms: u32,
 }
 
 #[cfg(target_os = "macos")]
@@ -672,19 +683,57 @@ fn force_rescan(watcher: State<'_, WatcherState>) -> Result<(), String> {
 
 #[derive(Clone, serde::Serialize)]
 struct WatchStatus {
+    /// A watcher OBJECT exists. Kept for compatibility, and deliberately no longer the whole answer:
+    /// it stays `true` in exactly the state that used to go unnoticed (see `health`).
     watching: bool,
     root: String,
+    /// `"live" | "paused" | "unreachable" | "stopped"` — the monitor's own state (§4.9).
+    health: String,
+    root_reachable: bool,
+    rearms: u32,
 }
 
-/// `watch_status()` → whether the live watcher is running + the active root. Uses `Projects` (always
-/// managed) so it still answers in read-only degrade mode (no writer/watcher).
+/// `watch_status()` → the live watcher's HEALTH + the active root. Uses `Projects` (always managed)
+/// so it still answers in read-only degrade mode (no writer/watcher).
+///
+/// This command used to answer `watching: <a watcher object is present>` and nothing else, which is
+/// `true` on a machine whose drive has been unplugged: the object is only a keep-alive, so it
+/// survives the death of its OS watch. The status therefore read "watching" while the app had
+/// silently stopped noticing disk — the one failure a user cannot see for themselves. `health` is
+/// read from the monitor's real state and is NEVER recomputed here from object presence.
 #[tauri::command]
 fn watch_status(
     watcher: State<'_, WatcherState>,
     projects: State<'_, Projects>,
 ) -> Result<WatchStatus, String> {
-    let watching = watcher.lock().map_err(|e| format!("watcher mutex poisoned: {e}"))?.is_some();
-    Ok(WatchStatus { watching, root: projects.active_root() })
+    let root = projects.active_root();
+    let guard = watcher.lock().map_err(|e| format!("watcher mutex poisoned: {e}"))?;
+    Ok(match guard.as_ref() {
+        Some(h) => {
+            let s = h.health();
+            WatchStatus {
+                watching: true,
+                root,
+                health: s.health.as_str().to_string(),
+                root_reachable: s.root_reachable,
+                rearms: s.rearms,
+            }
+        }
+        // No watcher at all — read-only degrade mode, or no project open. There is no monitor to
+        // ask, so `"stopped"` is true by construction; `root_reachable` is still worth answering
+        // honestly (the drive may be present and only the ENGINE unavailable, which is a different
+        // thing for the user to do something about), and one `read_dir` costs nothing.
+        None => {
+            let root_reachable = watcher::root_is_readable(std::path::Path::new(&root));
+            WatchStatus {
+                watching: false,
+                root,
+                health: Health::Stopped.as_str().to_string(),
+                root_reachable,
+                rearms: 0,
+            }
+        }
+    })
 }
 
 // ── engine bootstrap helpers ────────────────────────────────────────────────────────────────
@@ -746,16 +795,31 @@ fn make_ctx(root: &str) -> Arc<ReconcileCtx> {
     Arc::new(ReconcileCtx::new(root, Arc::new(PyMetaSource::new(root))))
 }
 
-/// Spawn the live watcher on `root`, emitting `index-changed` after each flush.
+/// Spawn the live watcher on `root`, emitting `index-changed` after each flush and `watch-health`
+/// on each health transition. Both are emitted from the watcher's own threads through the cloned
+/// `AppHandle` — the same route `index-changed` has always used (`Emitter` is what makes that legal
+/// off the main thread); the watcher module knows nothing about Tauri.
 fn spawn_watcher(app: &tauri::AppHandle, root: &str, writer: WriterState) -> Option<WatcherHandle> {
     let app_emit = app.clone();
     let root_owned = root.to_string();
+    let app_health = app.clone();
+    let root_for_health = root.to_string();
     WatcherHandle::spawn(
         root,
         writer,
         make_ctx(root),
         Box::new(move |dirs| {
             let _ = app_emit.emit("index-changed", IndexChanged { root: root_owned.clone(), dirs });
+        }),
+        Box::new(move |snap| {
+            let _ = app_health.emit(
+                "watch-health",
+                WatchHealth {
+                    root: root_for_health.clone(),
+                    health: snap.health.as_str().to_string(),
+                    rearms: snap.rearms,
+                },
+            );
         }),
     )
     .ok()

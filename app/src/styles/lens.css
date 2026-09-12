@@ -225,10 +225,14 @@
 .tbtn .swatches i{ width:6px; height:6px; border-radius:2px; display:inline-block; }
 
 /* ---- #livebtn — the live-update switch (a state readout, not a menu) ----
+   Four states, and the colour is the LAST channel each one uses — the label text names the state
+   too, because a pill that can only be read by its hue cannot be read at all by some people.
    LIVE  = a green dot, softly pulsing: the window follows the disk.
    HELD  = an amber dot, still, and the label counts the reloads being withheld. Amber rather than
    grey because held-back updates are a state you must be able to see you are in — a greyed-out
-   control reads as "unavailable", which is the wrong story. */
+   control reads as "unavailable", which is the wrong story.
+   UNREACHABLE = red, the folder is gone and the list has silently stopped updating (below).
+   STOPPED = grey and quiet, there is no watcher and that is normal (below). */
 .tbtn .livedot{
   width:7px; height:7px; border-radius:50%; display:inline-block; flex:0 0 auto;
   /* An explicit green, not a category token: this dot means GO, and --c-code happens to be blue.
@@ -239,6 +243,35 @@
 }
 .tbtn.held{ color:var(--fg-2); border-color:rgba(224,130,20,0.45); background:rgba(224,130,20,0.10); }
 .tbtn.held .livedot{ background:#e08214; box-shadow:none; animation:none; }
+
+/* UNREACHABLE = the folder itself cannot be read (drive unplugged, renamed, ejected). The watch
+   arms its OS-level watch once and has no re-arm path, so this used to be INVISIBLE: the window
+   went on showing the catalogue it already had and quietly stopped noticing the disk.
+   It is therefore the loudest control on the bar, and deliberately NOT the greyed-out treatment —
+   a greyed control reads as "off", and off is a choice the user made; this is a fault they have
+   not been told about yet. Red tint + the ⚠ in the label, so the state survives without colour. */
+.tbtn.watch-unreachable{
+  color:var(--fg);
+  border-color:rgba(248,81,73,0.55);
+  background:rgba(248,81,73,0.16);
+}
+.tbtn.watch-unreachable:hover{ border-color:rgba(248,81,73,0.80); background:rgba(248,81,73,0.22); }
+.tbtn.watch-unreachable .livedot{
+  background:var(--err);
+  /* A steady halo rather than the live pulse: alarming without moving, so it reads the same way
+     under prefers-reduced-motion as it does without it. */
+  box-shadow:0 0 0 3px rgba(248,81,73,0.20);
+  animation:none;
+}
+
+/* STOPPED = no watcher at all — read-only degrade (a second Lens window already holds this folder)
+   or nothing open yet. Ordinary, not a fault, so this is the QUIETEST state on the bar: a still
+   grey dot and no tint at all. The label ("Updates off") is what carries the meaning. */
+.tbtn.watch-stopped{ color:var(--muted); }
+/* keep the hover response — this rule follows .tbtn:hover and would otherwise cancel it, leaving
+   the one state that is NOT a fault looking like the one disabled control on the bar. */
+.tbtn.watch-stopped:hover{ color:var(--fg-2); }
+.tbtn.watch-stopped .livedot{ background:var(--c-other); box-shadow:none; animation:none; }
 @keyframes lens-livepulse{
   0%   { box-shadow:0 0 0 0   rgba(63,174,106,0.50); }
   70%  { box-shadow:0 0 0 5px rgba(63,174,106,0);    }
