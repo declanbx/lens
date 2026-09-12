@@ -775,6 +775,10 @@ details.raw[open] > summary::before{ content:"▾ "; }
   margin:8px 0 6px;
 }
 .substruct .sub-lbl:first-child{ margin-top:0; }
+/* A worksheet name is text the user typed, not a schema key: keep its case
+   and its spacing, or "Taq-man probe IDs" is shown back as something the
+   user cannot match against their own tab. */
+.substruct .sub-lbl.asis{ text-transform:none; letter-spacing:0; color:var(--fg-2); }
 /* truncation affordance for huge key-spaces (uns/varm/obsp) */
 .trunc{
   display:flex; align-items:center; gap:6px; margin-top:6px;

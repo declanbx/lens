@@ -46,6 +46,7 @@ DEFAULTS: Dict[str, Any] = {
     "skip_prefixes": ["._"],
     "csv_rowcount_max_bytes": 100 * 1024 * 1024,   # 100 MB raw
     "csvgz_rowcount_max_bytes": 25 * 1024 * 1024,  # 25 MB compressed
+    "xlsx_rowcount_max_bytes": 100 * 1024 * 1024,  # 100 MB uncompressed worksheet
     "json_parse_max_bytes": 5 * 1024 * 1024,       # 5 MB
     "code_parse_max_bytes": 5 * 1024 * 1024,       # 5 MB code/doc cheap-read gate
     "racy_window_seconds": 2,                      # incremental "racy" dirty window
@@ -63,6 +64,7 @@ DEFAULTS: Dict[str, Any] = {
         "npz": "data_matrix", "loom": "data_matrix",
         "csv": "data_table", "tsv": "data_table", "csv.gz": "data_table",
         "tsv.gz": "data_table", "parquet": "data_table", "xlsx": "data_table",
+        "xlsm": "data_table",
         "yaml": "config", "yml": "config", "toml": "config", "json": "config",
         "ini": "config",
         "md": "doc", "txt": "doc", "rst": "doc",
@@ -96,7 +98,8 @@ class Config:
         Lowercased ext (compound-aware) -> category string.
     ontology_tags : list[tuple[str, "re.Pattern"]]
         (tag, compiled-regex-over-relpath) pairs.
-    csv_rowcount_max_bytes, csvgz_rowcount_max_bytes, json_parse_max_bytes : int
+    csv_rowcount_max_bytes, csvgz_rowcount_max_bytes, xlsx_rowcount_max_bytes,
+    json_parse_max_bytes : int
         Performance gate thresholds.
     racy_window_seconds : int
         Coarse-granularity "racy" dirty window for incremental cache reuse. A
@@ -156,6 +159,7 @@ class Config:
     ontology_tags: List[Tuple[str, Any]] = field(default_factory=list)
     csv_rowcount_max_bytes: int = DEFAULTS["csv_rowcount_max_bytes"]
     csvgz_rowcount_max_bytes: int = DEFAULTS["csvgz_rowcount_max_bytes"]
+    xlsx_rowcount_max_bytes: int = DEFAULTS["xlsx_rowcount_max_bytes"]
     json_parse_max_bytes: int = DEFAULTS["json_parse_max_bytes"]
     code_parse_max_bytes: int = DEFAULTS["code_parse_max_bytes"]
     racy_window_seconds: int = DEFAULTS["racy_window_seconds"]
@@ -520,6 +524,11 @@ def load_config(
         csvgz_rowcount_max_bytes=int(
             merged.get(
                 "csvgz_rowcount_max_bytes", DEFAULTS["csvgz_rowcount_max_bytes"]
+            )
+        ),
+        xlsx_rowcount_max_bytes=int(
+            merged.get(
+                "xlsx_rowcount_max_bytes", DEFAULTS["xlsx_rowcount_max_bytes"]
             )
         ),
         json_parse_max_bytes=int(

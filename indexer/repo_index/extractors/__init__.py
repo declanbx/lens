@@ -32,6 +32,7 @@ from . import h5ad as h5ad  # noqa: F401,E402
 from . import hdf5 as hdf5  # noqa: F401,E402
 from . import npy as npy  # noqa: F401,E402
 from . import tabular as tabular  # noqa: F401,E402
+from . import xlsx as xlsx  # noqa: F401,E402
 from . import structured as structured  # noqa: F401,E402
 from . import image as image  # noqa: F401,E402
 from . import code as code  # noqa: F401,E402
@@ -64,6 +65,7 @@ __all__ = [
     "hdf5",
     "npy",
     "tabular",
+    "xlsx",
     "structured",
     "image",
     "code",

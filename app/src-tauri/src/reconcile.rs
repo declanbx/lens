@@ -159,7 +159,7 @@ pub fn category_for(ext: &str) -> &'static str {
     match ext {
         "py" | "r" | "sh" | "cpp" | "c" => "code",
         "h5ad" | "h5" | "npy" | "npz" | "loom" => "data_matrix",
-        "csv" | "tsv" | "csv.gz" | "tsv.gz" | "parquet" | "xlsx" => "data_table",
+        "csv" | "tsv" | "csv.gz" | "tsv.gz" | "parquet" | "xlsx" | "xlsm" => "data_table",
         "yaml" | "yml" | "toml" | "json" | "ini" => "config",
         "md" | "txt" | "rst" => "doc",
         "ipynb" => "notebook",
@@ -206,11 +206,19 @@ pub struct Extracted {
     pub extractor: String,
     pub meta: String, // raw JSON, stored verbatim (§4.7)
     pub error: Option<String>,
+    /// Set ONLY on the reuse path, from the prior row's own column. A freshly extracted file has
+    /// its figure text inside `meta` and this stays `None`.
+    pub prior_figure_text: Option<String>,
 }
 
 impl Default for Extracted {
     fn default() -> Self {
-        Extracted { extractor: "generic".into(), meta: "{}".into(), error: None }
+        Extracted {
+            extractor: "generic".into(),
+            meta: "{}".into(),
+            error: None,
+            prior_figure_text: None,
+        }
     }
 }
 
@@ -260,15 +268,18 @@ struct SnapRow {
     extractor: String,
     meta: String,
     has_error: bool,
+    /// The prior row's `figure_text`. Once the words are split out of `meta` there is nothing left
+    /// in the blob to re-derive them from, so an unchanged file's column has to be carried forward.
+    figure_text: Option<String>,
 }
 
 /// Snapshot the subtree rooted at `dir_key` ('' = whole tree). Keyed by `path_key`.
 fn snapshot_subtree(conn: &Connection, dir_key: &str) -> Result<HashMap<String, SnapRow>, String> {
     let (sql, params): (&str, Vec<rusqlite::types::Value>) = if dir_key.is_empty() {
-        ("SELECT path_key,size_bytes,mtime_iso,extractor,meta,error FROM entries WHERE is_dir=0", vec![])
+        ("SELECT path_key,size_bytes,mtime_iso,extractor,meta,error,figure_text FROM entries WHERE is_dir=0", vec![])
     } else {
         (
-            "SELECT path_key,size_bytes,mtime_iso,extractor,meta,error FROM entries \
+            "SELECT path_key,size_bytes,mtime_iso,extractor,meta,error,figure_text FROM entries \
              WHERE is_dir=0 AND (path_key = ?1 OR (path_key >= ?1 || '/' AND path_key < ?1 || '0'))",
             vec![rusqlite::types::Value::Text(dir_key.to_string())],
         )
@@ -284,6 +295,7 @@ fn snapshot_subtree(conn: &Connection, dir_key: &str) -> Result<HashMap<String, 
                     extractor: r.get::<_, Option<String>>(3)?.unwrap_or_default(),
                     meta: r.get::<_, Option<String>>(4)?.unwrap_or_else(|| "{}".into()),
                     has_error: r.get::<_, Option<String>>(5)?.is_some(),
+                    figure_text: r.get::<_, Option<String>>(6)?,
                 },
             ))
         })
@@ -359,7 +371,7 @@ fn build_row(rel: &str, st: &Stat, ex: &Extracted, now_iso: &str) -> Result<RowV
         meta: meta_raw,
         error: ex.error.clone(),
     };
-    Ok(RowValues::from_entry(&entry, now_iso))
+    Ok(RowValues::from_entry(&entry, now_iso).or_prior_figure_text(ex.prior_figure_text.clone()))
 }
 
 // ── the write batch (Phase C helpers) ─────────────────────────────────────────────────────────────
@@ -575,7 +587,12 @@ pub fn reconcile_tree(
             {
                 reused.insert(
                     rel.clone(),
-                    Extracted { extractor: prior.extractor.clone(), meta: prior.meta.clone(), error: None },
+                    Extracted {
+                        extractor: prior.extractor.clone(),
+                        meta: prior.meta.clone(),
+                        error: None,
+                        prior_figure_text: prior.figure_text.clone(),
+                    },
                 );
                 continue;
             }
@@ -803,7 +820,12 @@ mod tests {
                 .iter()
                 .map(|a| {
                     let ex = if a.ends_with("atlas.h5ad") {
-                        Extracted { extractor: "h5ad".into(), meta: r#"{"n_obs":2500,"n_vars":5}"#.into(), error: None }
+                        Extracted {
+                            extractor: "h5ad".into(),
+                            meta: r#"{"n_obs":2500,"n_vars":5}"#.into(),
+                            error: None,
+                            prior_figure_text: None,
+                        }
                     } else {
                         Extracted::default()
                     };
@@ -1045,6 +1067,62 @@ json.dump(out, sys.stdout)
         map
     }
 
+    /// END TO END, through the real crawler and the real reconcile: the words drawn inside an SVG
+    /// must land in their own column and must NOT be left in the blob the default search scans —
+    /// and must still be there after a second pass that reuses the (now clean) stored blob.
+    #[test]
+    fn figure_text_is_split_out_by_the_live_writer_and_survives_a_second_pass() {
+        if !python_ok() {
+            eprintln!("SKIP: python cannot import repo_index");
+            return;
+        }
+        let dir = scratch("figsplit");
+        write_file(
+            &dir,
+            "figures/volcano.svg",
+            br#"<svg xmlns="http://www.w3.org/2000/svg" width="200" height="100">
+                 <text x="10" y="20">HMGCR</text><text x="10" y="40">log2FC</text></svg>"#,
+        );
+        write_file(&dir, "a/data.csv", b"col1,col2\n1,2\n");
+
+        let w = writer_at(&dir);
+        let ctx = ReconcileCtx::new(
+            dir.to_str().unwrap(),
+            Arc::new(crate::helper::PyMetaSource { cfg_flags: vec![] }),
+        );
+
+        let read = |w: &crate::writer::IndexWriter| -> (String, Option<String>) {
+            w.with_conn(|c| {
+                c.query_row(
+                    "SELECT meta, figure_text FROM entries WHERE path='figures/volcano.svg'",
+                    [],
+                    |r| Ok((r.get::<_, Option<String>>(0)?.unwrap_or_default(), r.get(1)?)),
+                )
+                .map_err(|e| e.to_string())
+            })
+            .unwrap()
+        };
+
+        reconcile_tree(&w, &ctx, "").unwrap();
+        let (meta1, fig1) = read(&w);
+        let fig1 = fig1.expect("first pass wrote no figure_text column");
+        assert!(fig1.contains("hmgcr"), "figure text missing its words: {fig1}");
+        assert!(
+            !meta1.contains("figure_text"),
+            "figure text left in the default-search blob: {meta1}"
+        );
+
+        // Second pass: nothing changed on disk, so the file takes the REUSE path and the reconcile
+        // replays the stored blob — which no longer carries the words.
+        reconcile_tree(&w, &ctx, "").unwrap();
+        let (meta2, fig2) = read(&w);
+        assert_eq!(fig2.as_deref(), Some(fig1.as_str()), "the column was lost on the second pass");
+        assert!(!meta2.contains("figure_text"), "the words came back into the blob: {meta2}");
+
+        drop(w);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn rust_reconcile_matches_python_cold_manifest_nondefault_config() {
         if !python_ok() {
@@ -1099,12 +1177,33 @@ json.dump(out, sys.stdout)
         assert!(!rust_paths.contains("a/._sidecar.csv"));
         assert!(!rust_paths.iter().any(|p| p.starts_with("node_modules/")));
 
-        // (2) per-file (size, extractor, parsed meta) parity — the content_digest fields (§6.1)
+        // (2) per-file (size, extractor, parsed meta) parity — the content_digest fields (§6.1).
+        // The SVG figure-text keys are the ONE documented difference: the manifest keeps them
+        // inside `meta` (so `content_digest` still covers the text) and the live writer lifts them
+        // into the `figure_text` column, so they are stripped from both sides before comparing.
+        let strip_fig = |v: &serde_json::Value| -> serde_json::Value {
+            match v.as_object() {
+                Some(m) => serde_json::Value::Object(
+                    m.iter()
+                        .filter(|(k, _)| {
+                            !["figure_text", "figure_text_mode", "figure_text_truncated"]
+                                .contains(&k.as_str())
+                        })
+                        .map(|(k, v)| (k.clone(), v.clone()))
+                        .collect(),
+                ),
+                None => v.clone(),
+            }
+        };
         for (path, (psize, pextr, pmeta)) in &py {
             let (rsize, rextr, rmeta) = rust.get(path).unwrap_or_else(|| panic!("rust missing {path}"));
             assert_eq!(rsize, psize, "size mismatch for {path}");
             assert_eq!(rextr, pextr, "extractor mismatch for {path}");
-            assert_eq!(rmeta, pmeta, "parsed meta mismatch for {path}\n rust={rmeta}\n  py={pmeta}");
+            assert_eq!(
+                strip_fig(rmeta),
+                strip_fig(pmeta),
+                "parsed meta mismatch for {path}\n rust={rmeta}\n  py={pmeta}"
+            );
         }
 
         drop(w);

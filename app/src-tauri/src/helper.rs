@@ -188,15 +188,19 @@ impl MetaSource for PyMetaSource {
                     }
                     for p in chunk {
                         let ex = match by_path.get(p.as_str()) {
+                            // A freshly extracted file carries its figure text inside `meta`; the
+                            // split happens on the way into the row, so nothing is carried here.
                             Some(r) => Extracted {
                                 extractor: r.extractor.clone(),
                                 meta: r.meta.get().to_string(),
                                 error: r.error.clone(),
+                                prior_figure_text: None,
                             },
                             None => Extracted {
                                 extractor: "generic".into(),
                                 meta: "{}".into(),
                                 error: Some("extract-batch: no response for path".into()),
+                                prior_figure_text: None,
                             },
                         };
                         out.insert(p.clone(), ex);
@@ -207,7 +211,12 @@ impl MetaSource for PyMetaSource {
                     for p in chunk {
                         out.insert(
                             p.clone(),
-                            Extracted { extractor: "generic".into(), meta: "{}".into(), error: Some(e.clone()) },
+                            Extracted {
+                                extractor: "generic".into(),
+                                meta: "{}".into(),
+                                error: Some(e.clone()),
+                                prior_figure_text: None,
+                            },
                         );
                     }
                 }

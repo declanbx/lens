@@ -98,6 +98,7 @@ ext_to_category:
   tsv.gz: data_table
   parquet: data_table
   xlsx: data_table
+  xlsm: data_table
   yaml: config
   yml: config
   toml: config

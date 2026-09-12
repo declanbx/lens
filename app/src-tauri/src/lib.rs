@@ -380,7 +380,15 @@ fn switch_project(
     // placeholder index while `active_root` kept naming the absent project. Re-picking that same
     // project after plugging its volume back in would then hit this branch and silently leave the
     // user staring at the empty placeholder.
-    if projects.active_root() == root && db.current_index_path() == index_path {
+    // A re-pick of the SAME folder is the user's only gesture for "try again" when the engine
+    // failed to build at launch — a second Lens held the write lock, or the drive was absent. In
+    // that state the reader may well be pointed at the right index already, so the first two
+    // conditions both hold and this used to return success having done nothing at all. Requiring a
+    // live writer as well means the rebuild path below actually runs.
+    if projects.active_root() == root
+        && db.current_index_path() == index_path
+        && app.try_state::<WriterState>().is_some()
+    {
         *crosslinks.lock().map_err(|e| format!("crosslinks mutex poisoned: {e}"))? =
             Crosslinks::load(&proj.crosslinks_path());
         return Ok(());
@@ -414,11 +422,15 @@ fn switch_project(
                 app.manage::<WriterState>(writer);
                 app.manage::<OpLogState>(Mutex::new(oplog));
                 app.manage::<RegistryState>(Mutex::new(DeferralRegistry::new()));
+                set_degrade(&app, EngineDegrade::default());
                 // `WatcherState` is always managed from `.setup()` (as `None` when there was no
                 // project), so it is SET rather than managed — `manage` would be a silent no-op.
                 set_watcher(watcher);
             }
-            Err(e) => eprintln!("[lens] live-index engine unavailable — read-only mode: {e}"),
+            Err(e) => {
+                eprintln!("[lens] live-index engine unavailable — read-only mode: {e}");
+                set_degrade(&app, classify_engine_failure(&root, &e));
+            }
         }
         db.reopen_at(&index_path)?;
         *crosslinks.lock().map_err(|e| format!("crosslinks mutex poisoned: {e}"))? =
@@ -691,6 +703,14 @@ struct WatchStatus {
     health: String,
     root_reachable: bool,
     rearms: u32,
+    /// Why there is no live engine: `""` when healthy, else `no_project` / `folder_unreachable` /
+    /// `locked_by_other` / `other`. Without it the window can only say "Updates off" and guess at
+    /// the cause — and it guessed a second Lens window even when the drive was unplugged.
+    degrade_code: String,
+    /// The underlying error text, for the tooltip's detail line.
+    degrade_message: String,
+    /// True when trying again could plausibly work now, so the window knows whether to retry.
+    retryable: bool,
 }
 
 /// `watch_status()` → the live watcher's HEALTH + the active root. Uses `Projects` (always managed)
@@ -705,8 +725,10 @@ struct WatchStatus {
 fn watch_status(
     watcher: State<'_, WatcherState>,
     projects: State<'_, Projects>,
+    degrade: State<'_, EngineDegradeState>,
 ) -> Result<WatchStatus, String> {
     let root = projects.active_root();
+    let d = degrade.lock().unwrap_or_else(|p| p.into_inner()).clone();
     let guard = watcher.lock().map_err(|e| format!("watcher mutex poisoned: {e}"))?;
     Ok(match guard.as_ref() {
         Some(h) => {
@@ -717,6 +739,9 @@ fn watch_status(
                 health: s.health.as_str().to_string(),
                 root_reachable: s.root_reachable,
                 rearms: s.rearms,
+                degrade_code: String::new(),
+                degrade_message: String::new(),
+                retryable: false,
             }
         }
         // No watcher at all — read-only degrade mode, or no project open. There is no monitor to
@@ -725,15 +750,68 @@ fn watch_status(
         // thing for the user to do something about), and one `read_dir` costs nothing.
         None => {
             let root_reachable = watcher::root_is_readable(std::path::Path::new(&root));
+            // Retry is worth offering for anything except "no folder chosen" — including an
+            // unreachable one, whose whole point is that the drive may be back.
+            let retryable = !root.is_empty() && d.code != "no_project";
             WatchStatus {
                 watching: false,
                 root,
                 health: Health::Stopped.as_str().to_string(),
                 root_reachable,
                 rearms: 0,
+                degrade_code: d.code.to_string(),
+                degrade_message: d.message,
+                retryable,
             }
         }
     })
+}
+
+/// Try once to build the live engine for the active folder, and start watching if it works.
+///
+/// The engine is built at launch and on a project switch, and nowhere else — so a drive plugged back
+/// in, or a second Lens window being closed, changed nothing on its own and the window stayed
+/// read-only until it was restarted. This is the retry, called by the window on a backoff while it
+/// is degraded, and safe to call at any time: it is a no-op when an engine already exists, and one
+/// failed attempt costs a lock probe.
+///
+/// Returns `true` when the engine is now live.
+#[tauri::command]
+fn retry_live_engine(app: tauri::AppHandle) -> Result<bool, String> {
+    if app.try_state::<WriterState>().is_some() {
+        return Ok(true); // already live — nothing to retry
+    }
+    let Some(projects) = app.try_state::<Projects>() else { return Ok(false) };
+    let root = projects.active_root();
+    if root.is_empty() {
+        return Ok(false); // no folder chosen; nothing to build an engine for
+    }
+    let Ok(proj) = projects.get(&root) else { return Ok(false) };
+    let index_path = proj.index_path();
+
+    match build_engine(&app, &root, &index_path) {
+        Ok((writer, oplog)) => {
+            let watcher = spawn_watcher(&app, &root, writer.clone());
+            app.manage::<WriterState>(writer);
+            app.manage::<OpLogState>(Mutex::new(oplog));
+            app.manage::<RegistryState>(Mutex::new(DeferralRegistry::new()));
+            // `WatcherState` is always managed from `.setup()`, so SET it — `manage` is a no-op
+            // once a type is managed and would silently drop the handle (stopping the watcher).
+            if let Some(w) = app.try_state::<WatcherState>() {
+                let mut g = w.lock().unwrap_or_else(|p| p.into_inner());
+                if let Some(old) = g.take() {
+                    old.stop();
+                }
+                *g = watcher;
+            }
+            set_degrade(&app, EngineDegrade::default());
+            Ok(true)
+        }
+        Err(e) => {
+            set_degrade(&app, classify_engine_failure(&root, &e));
+            Ok(false)
+        }
+    }
 }
 
 // ── engine bootstrap helpers ────────────────────────────────────────────────────────────────
@@ -749,6 +827,43 @@ fn oplog_path_for(app: &tauri::AppHandle, root: &str) -> Result<String, String> 
 /// Open the writer (acquires the single-writer lock + migrates v1→v2) and the op-journal, then run
 /// crash recovery. Returns `Err` if another live Lens instance holds the writer lock (the caller
 /// degrades to read-only mode, §3.9).
+/// Why there is no live engine right now, in a form the window can act on.
+///
+/// "No engine" reaches the user as a single flat "Updates off", which then has to GUESS a cause —
+/// and it guessed "a second Lens window" even when the real cause was an unplugged drive. The
+/// engine's failure is classified once, here, and carried to the status bar so the sentence shown
+/// is the true one.
+#[derive(Clone, Default)]
+pub struct EngineDegrade {
+    /// `""` when the engine is healthy. Otherwise one of `no_project`, `folder_unreachable`,
+    /// `locked_by_other`, `other` — a stable vocabulary the frontend switches on.
+    pub code: &'static str,
+    /// The underlying error, for the tooltip's second line and the console.
+    pub message: String,
+}
+type EngineDegradeState = Mutex<EngineDegrade>;
+
+/// Classify an engine-build failure. Lock conflict first: an unreachable folder cannot produce that
+/// message, but a second instance on a *reachable* folder is the commonest cause of the state.
+fn classify_engine_failure(root: &str, err: &str) -> EngineDegrade {
+    let code = if writer::lock_held_by_other(err) {
+        "locked_by_other"
+    } else if !watcher::root_is_readable(std::path::Path::new(root)) {
+        "folder_unreachable"
+    } else {
+        "other"
+    };
+    EngineDegrade { code, message: err.to_string() }
+}
+
+/// Record the current degrade state. Managed from `.setup()` so it is always present.
+fn set_degrade(app: &tauri::AppHandle, d: EngineDegrade) {
+    if let Some(st) = app.try_state::<EngineDegradeState>() {
+        let mut g = st.lock().unwrap_or_else(|p| p.into_inner());
+        *g = d;
+    }
+}
+
 fn build_engine(
     app: &tauri::AppHandle,
     root: &str,
@@ -938,6 +1053,19 @@ pub fn run() {
             app.manage(db);
             app.manage(Mutex::new(crosslinks));
 
+            let degrade = match &engine {
+                Some(Ok(_)) => EngineDegrade::default(),
+                Some(Err(e)) => classify_engine_failure(
+                    &active.as_ref().map(|a| a.root.clone()).unwrap_or_default(),
+                    e,
+                ),
+                None => EngineDegrade {
+                    code: "no_project",
+                    message: "no folder has been chosen yet".into(),
+                },
+            };
+            app.manage::<EngineDegradeState>(Mutex::new(degrade));
+
             match engine {
                 Some(Ok((writer, oplog))) => {
                     let root = active.as_ref().map(|a| a.root.clone()).unwrap_or_default();
@@ -1011,6 +1139,7 @@ pub fn run() {
             count_children,
             force_rescan,
             watch_status,
+            retry_live_engine,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
@@ -1031,4 +1160,49 @@ pub fn run() {
                 }
             }
         });
+}
+
+#[cfg(test)]
+mod degrade_tests {
+    use super::*;
+
+    /// The status bar shows a different sentence for each of these, so picking the wrong one sends
+    /// the user to look for the wrong problem.
+    #[test]
+    fn a_lock_conflict_is_named_as_one_even_on_a_reachable_folder() {
+        let here = std::env::current_dir().unwrap();
+        let root = here.to_string_lossy().to_string();
+        // The folder is plainly readable, so only the message can distinguish the two causes.
+        assert!(watcher::root_is_readable(&here));
+        let d = classify_engine_failure(
+            &root,
+            &format!("{} (pid 123) is editing this index", writer::LOCK_HELD_MARKER),
+        );
+        assert_eq!(d.code, "locked_by_other");
+    }
+
+    #[test]
+    fn an_absent_folder_is_named_as_absent_not_as_a_second_window() {
+        let d = classify_engine_failure(
+            "/Volumes/definitely-not-mounted-9f3a",
+            "open lock \"/Volumes/definitely-not-mounted-9f3a/_repo_index\": No such file or directory",
+        );
+        assert_eq!(d.code, "folder_unreachable");
+    }
+
+    /// Anything else keeps its own message rather than being forced into one of the two stories.
+    #[test]
+    fn an_unclassifiable_failure_carries_its_own_message() {
+        let root = std::env::current_dir().unwrap().to_string_lossy().to_string();
+        let d = classify_engine_failure(&root, "disk I/O error");
+        assert_eq!(d.code, "other");
+        assert_eq!(d.message, "disk I/O error");
+    }
+
+    /// A healthy engine must report nothing — an empty code is what disarms the retry loop.
+    #[test]
+    fn the_default_degrade_is_healthy() {
+        assert_eq!(EngineDegrade::default().code, "");
+        assert!(EngineDegrade::default().message.is_empty());
+    }
 }

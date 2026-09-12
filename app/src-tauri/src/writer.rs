@@ -176,6 +176,19 @@ fn owner_still_live(rec: &LockRecord) -> bool {
     }
 }
 
+/// The phrase every "someone else holds the write lock" message is built from.
+///
+/// `open` reports its failures as strings, and the UI has to tell a lock conflict (a second Lens
+/// window — ordinary, recoverable by quitting it) apart from an unreadable folder (an unplugged
+/// drive) so it can say which one happened. Rather than let a `contains("another Lens")` spread to
+/// every caller, the phrase and the test for it live here together and cannot drift apart.
+pub const LOCK_HELD_MARKER: &str = "another Lens instance";
+
+/// True when `err` came from a lock already held by a different Lens process.
+pub fn lock_held_by_other(err: &str) -> bool {
+    err.contains(LOCK_HELD_MARKER)
+}
+
 impl WriterLock {
     pub fn acquire(index_dir: &Path) -> Result<WriterLock, String> {
         std::fs::create_dir_all(index_dir).map_err(|e| format!("mkdir {index_dir:?}: {e}"))?;
@@ -191,7 +204,7 @@ impl WriterLock {
         if !flock_ok {
             // flock definitively says another process holds it.
             return Err(format!(
-                "another Lens instance is editing this index (flock held on {path:?})"
+                "{LOCK_HELD_MARKER} is editing this index (flock held on {path:?})"
             ));
         }
         // flock succeeded — but it may be a no-op on exFAT, so verify the recorded owner is not still
@@ -199,7 +212,7 @@ impl WriterLock {
         if let Some(rec) = read_record(&path) {
             if rec.pid() != std::process::id() && owner_still_live(&rec) {
                 return Err(format!(
-                    "another Lens instance (pid {}) is editing this index",
+                    "{LOCK_HELD_MARKER} (pid {}) is editing this index",
                     rec.pid()
                 ));
             }
@@ -338,6 +351,32 @@ impl IndexWriter {
 
 #[cfg(test)]
 mod tests {
+
+    /// The status bar decides what to TELL the user from this predicate, so it has to hold for the
+    /// real messages `acquire` produces — not for a string written out by hand in a test.
+    #[test]
+    fn a_second_acquire_is_recognised_as_a_lock_conflict() {
+        let dir = scratch("lockmsg");
+        let first = WriterLock::acquire(&dir).expect("first acquire should succeed");
+        let err = match WriterLock::acquire(&dir) {
+            Ok(_) => panic!("second acquire must fail while the first lock is held"),
+            Err(e) => e,
+        };
+        assert!(
+            lock_held_by_other(&err),
+            "a real lock conflict was not recognised as one: {err}"
+        );
+        drop(first);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// ...and must not fire on an unrelated failure, or an unplugged drive would be reported as a
+    /// second Lens window.
+    #[test]
+    fn an_unrelated_error_is_not_a_lock_conflict() {
+        assert!(!lock_held_by_other("open lock \"/Volumes/gone/_repo_index\": No such file or directory"));
+        assert!(!lock_held_by_other("disk I/O error"));
+    }
     use super::*;
     use std::path::PathBuf;
 

@@ -181,6 +181,13 @@ export interface WatchStatus {
   health: string; // one of WatchHealth — narrowed by asHealth()
   root_reachable: boolean;
   rearms: number;
+  /// Why there is no live engine: "" when healthy, else "no_project" | "folder_unreachable" |
+  /// "locked_by_other" | "other". "Updates off" alone cannot say WHICH, and the window used to
+  /// name a second Lens window as the cause even when the drive was simply unplugged.
+  degrade_code?: string;
+  degrade_message?: string;
+  /// Whether asking the backend to try again could plausibly work now.
+  retryable?: boolean;
 }
 
 /// Payload of the backend "watch-health" event. Emitted ON EVERY TRANSITION of `health` and never
@@ -225,6 +232,7 @@ const api = {
   // the problem: a status nobody calls cannot warn anybody. Polled at boot and after every project
   // switch; between those, the "watch-health" event does the talking.
   watchStatus: () => invoke<WatchStatus>("watch_status"),
+  retryLiveEngine: () => invoke<boolean>("retry_live_engine"),
   // Multi-project surface (Phase-2 UI). The backend keeps EXACTLY ONE project resident; switch
   // repoints the single connection. `add_project` only registers (caller indexes + switches).
   listProjects: () => invoke<Project[]>("list_projects"),
@@ -623,8 +631,11 @@ function buildFileRow(r: Row, depth: number): HTMLElement {
   node.draggable = true; // native file drag-out (delegated dragstart handler on #list)
   if (r.id === state.selectedId) node.classList.add("sel");
 
+  // Shape cell. Matrix files carry cells × genes, tables rows × columns — both
+  // now land in the same two denormalized columns, so one branch serves both and
+  // spreadsheets stop showing a blank cell next to a csv that shows one.
   const dims =
-    r.category === "data_matrix"
+    (r.category === "data_matrix" || r.category === "data_table") && r.n_obs !== null
       ? `${fmtNum(r.n_obs)}<span class="x">×</span>${r.n_vars ?? "—"}`
       : "";
   const szClass = r.size_bytes >= 1e9 ? "sz heavy" : "sz";
@@ -1862,6 +1873,75 @@ function metaList(meta: Record<string, unknown>, key: string): string[] {
   return [];
 }
 
+// A numeric meta field, or null. Kept separate from metaStr because the dataset
+// card needs to distinguish "absent" from the string "0".
+function metaNum(meta: Record<string, unknown>, key: string): number | null {
+  const v = meta[key];
+  return typeof v === "number" && Number.isFinite(v) ? v : null;
+}
+
+// Column NAMES out of a meta field, for every shape the crawler writes one in:
+// csv/tsv/xlsx store a plain list of names, parquet stores {name, type} records
+// (so it can show the column's type). Anything else yields nothing rather than
+// Object.keys of a stray object, which is what metaList would do.
+function metaColumnNames(meta: Record<string, unknown>, key: string): string[] {
+  const v = meta[key];
+  if (!Array.isArray(v)) return [];
+  return v.map((x) =>
+    x && typeof x === "object" && "name" in (x as Record<string, unknown>)
+      ? String((x as Record<string, unknown>).name)
+      : String(x),
+  );
+}
+
+// One worksheet as the xlsx extractor records it. A workbook that the crawler
+// could not open has no sheets array at all, and the card is simply not drawn.
+interface SheetInfo {
+  name: string;
+  columns: string[];
+  n_columns: number;
+  row_count: number | null;
+  row_count_exact: boolean;
+  row_count_reason: string | null;
+}
+function sheetsOf(meta: Record<string, unknown>): SheetInfo[] {
+  const v = meta["sheets"];
+  if (!Array.isArray(v)) return [];
+  return v.map((raw) => {
+    const o = (raw && typeof raw === "object" ? raw : {}) as Record<string, unknown>;
+    const rc = o["row_count"];
+    return {
+      name: typeof o["name"] === "string" ? (o["name"] as string) : "—",
+      columns: metaColumnNames(o, "columns"),
+      n_columns: typeof o["n_columns"] === "number" ? (o["n_columns"] as number) : 0,
+      row_count: typeof rc === "number" ? rc : null,
+      row_count_exact: o["row_count_exact"] === true,
+      row_count_reason:
+        typeof o["row_count_reason"] === "string" ? (o["row_count_reason"] as string) : null,
+    };
+  });
+}
+
+// Why a row count is missing or approximate, in words rather than the crawler's
+// token. Shown beside the count so an estimate is never mistaken for a census.
+function rowCountNote(reason: string | null, exact: boolean): string {
+  if (exact) return "";
+  switch (reason) {
+    case "size_gated":
+      return "declared range — file too large to count";
+    case "no_dimension":
+      return "not counted — file too large";
+    case "read_error":
+      return "could not be read";
+    case "sheet_cap":
+      return "sheet not inspected";
+    case "empty":
+      return "empty";
+    default:
+      return reason ? reason : "not counted";
+  }
+}
+
 function chipList(names: string[], extraClass = ""): string {
   if (!names.length) return `<span class="chip" style="color:var(--faint)">none</span>`;
   return names
@@ -1894,13 +1974,32 @@ function renderInspector(d: EntryDetail): void {
 
   // ── DATASET card (matrix/table only): bigstat shape + metagrid from meta. ──
   let datasetCard = "";
+  const sheets = sheetsOf(meta);
+  // Column names, whichever kind of table this is. h5ad keeps its annotation
+  // names under a different key and is handled by its own card below.
+  const tableColumns = metaColumnNames(meta, "columns");
   if (isMatrix || isTable) {
-    const nObs = fmtNum(r.n_obs);
-    const nVars = r.n_vars ?? "—";
+    // The denormalized n_obs/n_vars columns are filled for matrix files only, so
+    // a spreadsheet fell through to "— × —" even though the crawler had recorded
+    // both numbers in meta. Read those as the fallback: row_count/n_columns for
+    // csv/tsv/xlsx, num_rows for parquet (pyarrow's own field name).
+    const rowsN = r.n_obs ?? metaNum(meta, "row_count") ?? metaNum(meta, "num_rows");
+    const colsN = r.n_vars ?? metaNum(meta, "n_columns");
+    const nObs = fmtNum(rowsN);
+    const nVars = colsN === null || colsN === undefined ? "—" : fmtNum(colsN);
+    // A multi-sheet workbook has no single shape, so it leads with its sheet
+    // count and the per-sheet block below carries each sheet's rows x columns.
+    const multiSheet = sheets.length > 1;
     const xEnc = metaStr(meta, "X_encoding");
     const xDtype = metaStr(meta, "X_dtype");
     const obsIndex = metaStr(meta, "obs_index");
     const hasRaw = meta["has_raw"];
+    const delim = metaStr(meta, "delimiter");
+    const rowsExact = meta["row_count_exact"] === true;
+    const rowsReason = metaStr(meta, "row_count_reason");
+    const nSheets = metaNum(meta, "n_sheets");
+    const primarySheet = metaStr(meta, "primary_sheet");
+    const rowGroups = metaNum(meta, "num_row_groups");
     const grid: string[] = [];
     if (xEnc) grid.push(`<span class="k">X encoding</span><span class="v">${esc(xEnc)}</span>`);
     if (xDtype) grid.push(`<span class="k">X dtype</span><span class="v">${esc(xDtype)}</span>`);
@@ -1912,27 +2011,78 @@ function renderInspector(d: EntryDetail): void {
         `<span class="k">has_raw</span><span class="v ${yes ? "yes" : "no"}">${yes ? "✓" : "✗"}</span>`,
       );
     }
+    if (delim)
+      grid.push(
+        `<span class="k">delimiter</span><span class="v">${esc(delim === "\t" ? "tab" : delim)}</span>`,
+      );
+    // Only worth a row when the headline number is NOT already the sheet count.
+    if (nSheets !== null && !multiSheet)
+      grid.push(`<span class="k">sheets</span><span class="v">${fmtNum(nSheets)}</span>`);
+    if (primarySheet && !multiSheet)
+      grid.push(`<span class="k">sheet</span><span class="v">${esc(primarySheet)}</span>`);
+    if (rowGroups !== null)
+      grid.push(`<span class="k">row groups</span><span class="v">${fmtNum(rowGroups)}</span>`);
+    // Never let an estimated row count pass as a counted one.
+    if (rowsN !== null && !rowsExact && (rowsReason || meta["row_count_exact"] === false))
+      grid.push(
+        `<span class="k">row count</span><span class="v no">${esc(rowCountNote(rowsReason, false))}</span>`,
+      );
     const gridHtml = grid.length ? `<div class="metagrid">${grid.join("")}</div>` : "";
     datasetCard =
       `<div class="card"><div class="ch"><span class="sechdr">Dataset</span></div>` +
-      `<div class="bigstat">${nObs} <span class="x">×</span> ${nVars}` +
-      `<span class="sub">${isMatrix ? "cells × genes" : "rows × columns"}</span></div>` +
+      (multiSheet
+        ? `<div class="bigstat">${fmtNum(sheets.length)}` +
+          `<span class="sub">worksheets — each sheet's shape is listed below</span></div>`
+        : `<div class="bigstat">${nObs} <span class="x">×</span> ${nVars}` +
+          `<span class="sub">${isMatrix ? "cells × genes" : "rows × columns"}</span></div>`) +
       gridHtml +
       `</div>`;
   }
 
-  // ── OBS COLUMNS card (collapsed details.raw with a filter + ⧉all). ──
+  // ── COLUMN NAMES card (collapsed details.raw with a filter + ⧉all). ──
+  // One card, two sources: a matrix file's per-cell annotation names, or a
+  // table's header row. They are the same thing to a reader looking for a field
+  // name, so they get the same control — filter box, copy-all, chips — and only
+  // the wording changes. `filterNames` is what the filter + copy-all act on.
   const obs = metaList(meta, "obs_columns");
+  const filterNames = obs.length ? obs : tableColumns;
+  const columnsLabel = obs.length ? "Obs columns" : "Column names";
   let obsCard = "";
-  if (obs.length) {
+  if (filterNames.length) {
     obsCard =
-      `<div class="card"><details class="raw">` +
-      `<summary>Obs columns <span class="cbadge">${obs.length}</span></summary>` +
+      `<div class="card"><details class="raw"${obs.length ? "" : " open"}>` +
+      `<summary>${columnsLabel} <span class="cbadge">${filterNames.length}</span></summary>` +
       `<div class="ch" style="margin:9px 0"><span></span><span class="r">` +
-      `<input class="obsfilter" placeholder="filter obs…" />` +
+      `<input class="obsfilter" placeholder="filter columns…" />` +
       `<span class="miniact" data-copy-list="obs">⧉ all</span></span></div>` +
-      `<div class="chips" data-obs-chips>${chipList(obs)}</div>` +
+      `<div class="chips" data-obs-chips>${chipList(filterNames)}</div>` +
       `</details></div>`;
+  }
+
+  // ── SHEETS card (workbooks): one block per worksheet — its name, its shape,
+  // and its own header row. A workbook is several tables in one file, so
+  // collapsing it to the first sheet would hide most of what it contains.
+  let sheetsCard = "";
+  if (sheets.length) {
+    const blocks = sheets
+      .map((sh) => {
+        const note = rowCountNote(sh.row_count_reason, sh.row_count_exact);
+        const shape =
+          `${sh.row_count === null ? "—" : fmtNum(sh.row_count)} × ${fmtNum(sh.n_columns)}` +
+          (note ? ` <span style="color:var(--err)">(${esc(note)})</span>` : "");
+        return (
+          `<div class="sub-lbl asis">${esc(sh.name)} <span class="cbadge">${shape}</span></div>` +
+          `<div class="chips">${chipList(sh.columns.slice(0, 64))}</div>` +
+          (sh.columns.length > 64
+            ? `<div class="trunc">64 of ${sh.columns.length} shown</div>`
+            : "")
+        );
+      })
+      .join("");
+    sheetsCard =
+      `<div class="card"><details class="raw" open>` +
+      `<summary>Sheets <span class="cbadge">${sheets.length}</span></summary>` +
+      `<div class="substruct">${blocks}</div></details></div>`;
   }
 
   // ── OBSM card (chips; umap keys get .chip.umap). ──
@@ -2019,16 +2169,17 @@ function renderInspector(d: EntryDetail): void {
     pathCard +
     datasetCard +
     obsCard +
+    sheetsCard +
     obsmCard +
     structCard +
     lineageCard +
     provCard +
     `</div></div>`;
 
-  wireInspectorEvents(obs);
+  wireInspectorEvents(filterNames, columnsLabel.toLowerCase());
 }
 
-function wireInspectorEvents(obsColumns: string[]): void {
+function wireInspectorEvents(obsColumns: string[], columnsLabel = "obs columns"): void {
   // Copy / reveal buttons (hero + path lines).
   inspectorEl.querySelectorAll<HTMLElement>("[data-copy]").forEach((node) => {
     node.addEventListener("click", () => {
@@ -2084,7 +2235,7 @@ function wireInspectorEvents(obsColumns: string[]): void {
     copyAll.addEventListener("click", () => {
       void navigator.clipboard
         .writeText(obsColumns.join("\n"))
-        .then(() => flashStatus(`Copied ${obsColumns.length} obs columns`));
+        .then(() => flashStatus(`Copied ${obsColumns.length} ${columnsLabel}`));
     });
   }
 }
@@ -2318,6 +2469,9 @@ let liveHeldPending = 0; // flushes that arrived while held (coalesced — one r
 let watchHealth: WatchHealth = "live";
 let watchRoot = ""; // the folder the health above is ABOUT — the tooltip names it
 let watchRootReachable = true;
+/// Why the engine is down, straight from the backend — never inferred here.
+let watchDegradeCode = "";
+let watchDegradeMessage = "";
 let watchRearms = 0;
 
 /// Narrow the wire string. An unrecognised value is not a crash and not a guess: fall back to the
@@ -2389,18 +2543,34 @@ function paintLiveBtn(): void {
       return;
     }
     case "stopped": {
-      // Calm on purpose: the ordinary cause is a second copy of Lens holding the folder, which is
-      // not a fault and not something to shout about.
+      // Calm on purpose — the commonest cause is a second Lens window, which is not a fault. But
+      // the CAUSE comes from the backend now: naming a second window while the real problem is an
+      // unplugged drive sends the user looking for the wrong thing.
+      const folder = watchFolderName();
+      const cause =
+        watchDegradeCode === "locked_by_other"
+          ? `Another Lens window already has ${folder} open, so this one is not updating the ` +
+            `catalogue. Close the other window and Lens will pick it up within a few seconds.`
+          : watchDegradeCode === "folder_unreachable"
+            ? `Lens cannot reach ${folder}, so it is not updating the catalogue. Reconnect the ` +
+              `drive and Lens will pick it up on its own.`
+            : watchDegradeCode === "other"
+              ? `Lens could not start watching ${folder}, so new files will not appear on their ` +
+                `own.\nReason: ${watchDegradeMessage}`
+              : `Lens is not watching ${folder} for changes, so new files will not appear on ` +
+                `their own.\nUse the refresh button to check for new work.`;
       label.textContent = "Updates off";
       btn.title =
         watchRoot === ""
           ? "No folder is open, so there is nothing to keep up with yet."
-          : `Lens is not watching ${watchFolderName()} for changes, so new files will not appear on ` +
-            `their own. This is normal when a second Lens window already has the folder open.\nUse the ` +
-            `refresh button to check for new work.${alsoGone}${where}`;
+          : `${cause}${alsoGone}${where}`;
       btn.setAttribute(
         "aria-label",
-        "Live updates are off. New files will not appear on their own; use the refresh button.",
+        watchDegradeCode === "locked_by_other"
+          ? "Live updates are off because another Lens window has this folder open."
+          : watchDegradeCode === "folder_unreachable"
+            ? "Live updates are off because Lens cannot reach the folder."
+            : "Live updates are off. New files will not appear on their own; use the refresh button.",
       );
       return;
     }
@@ -2478,12 +2648,16 @@ function applyWatchHealth(
   root: string,
   rearms: number,
   rootReachable: boolean,
+  degradeCode = "",
+  degradeMessage = "",
 ): void {
   const prev = watchHealth;
   watchHealth = next;
   watchRoot = root;
   watchRearms = rearms;
   watchRootReachable = rootReachable;
+  watchDegradeCode = degradeCode;
+  watchDegradeMessage = degradeMessage;
   paintLiveBtn();
   if (next === prev) return;
 
@@ -2504,6 +2678,58 @@ function applyWatchHealth(
   }
 }
 
+// ── SELF-HEAL (the live engine retry) ────────────────────────────────────────────────────────
+//
+// The engine — the part that holds the write lock and runs the folder watch — is built once at
+// launch and once per project switch, and nowhere else. So the two ways it can fail to start (a
+// second Lens window holding the lock, or the drive being absent) both left the window read-only
+// until it was restarted, however long ago the cause went away. This asks the backend to try again
+// while the window is in that state, and stops the moment it succeeds.
+//
+// Backoff rather than a fixed interval: a lock genuinely held by a window the user is still using
+// would otherwise be probed forever at full rate, and a probe takes a lock attempt on their disk.
+const ENGINE_RETRY_MIN_MS = 5_000;
+const ENGINE_RETRY_MAX_MS = 60_000;
+let engineRetryTimer: number | null = null;
+let engineRetryDelay = ENGINE_RETRY_MIN_MS;
+
+/// Arm or disarm the retry. `wanted` is the backend's own verdict on whether trying again could
+/// work — never a guess made here.
+function scheduleEngineRetry(wanted: boolean): void {
+  if (!wanted) {
+    if (engineRetryTimer !== null) {
+      window.clearTimeout(engineRetryTimer);
+      engineRetryTimer = null;
+    }
+    engineRetryDelay = ENGINE_RETRY_MIN_MS; // a healthy engine resets the backoff
+    return;
+  }
+  if (engineRetryTimer !== null) return; // already armed — never stack a second timer
+  engineRetryTimer = window.setTimeout(() => {
+    engineRetryTimer = null;
+    void attemptEngineRetry();
+  }, engineRetryDelay);
+}
+
+async function attemptEngineRetry(): Promise<void> {
+  let live = false;
+  try {
+    live = await api.retryLiveEngine();
+  } catch (e) {
+    console.error("[lens] retry_live_engine failed:", e);
+  }
+  if (live) {
+    engineRetryDelay = ENGINE_RETRY_MIN_MS;
+    flashStatus("live updates resumed");
+    // Repaint off the truth rather than assuming: the engine being up is not by itself proof the
+    // folder is reachable, and `refreshWatchHealth` re-arms or disarms the timer for us.
+    await refreshWatchHealth();
+    return;
+  }
+  engineRetryDelay = Math.min(engineRetryDelay * 2, ENGINE_RETRY_MAX_MS);
+  scheduleEngineRetry(true);
+}
+
 /// Ask the backend outright. Called at boot and after every project switch — the two moments where
 /// there is no transition to listen for because the thing being watched has just changed.
 async function refreshWatchHealth(): Promise<void> {
@@ -2514,7 +2740,10 @@ async function refreshWatchHealth(): Promise<void> {
       st.root ?? "",
       st.rearms ?? 0,
       st.root_reachable ?? true,
+      st.degrade_code ?? "",
+      st.degrade_message ?? "",
     );
+    scheduleEngineRetry(st.retryable === true);
   } catch (e) {
     // Leave the pill exactly as it was. A failed status call says the backend is unwell; it does
     // not say the watch is dead, and painting "Folder missing" off a failed question would be a
@@ -2554,6 +2783,7 @@ async function wireWatchHealth(): Promise<void> {
       () => {
         watchHealthUnlisten?.();
         watchHealthUnlisten = null;
+        scheduleEngineRetry(false); // never leave a retry timer running on a dead window
       },
       { once: true },
     );

@@ -92,27 +92,28 @@ const CREATE_SCHEMA_META: &str =
 const CREATE_FTS: &str =
     "CREATE VIRTUAL TABLE IF NOT EXISTS fts USING fts5(path, searchtext, content='', tokenize='unicode61');";
 
-/// The 22 columns a row INSERT binds (id auto-assigned; `parent_id`/`child_count` resolved in pass
+/// The 23 columns a row INSERT binds (id auto-assigned; `parent_id`/`child_count` resolved in pass
 /// 2). Used for dir synthesis during migration, BEFORE the UNIQUE `path_key` index exists (so it
 /// cannot carry an `ON CONFLICT(path_key)` target — synthesis already excludes collisions).
 const INSERT_SQL: &str = "\
 INSERT INTO entries
   (path,category,ext,size_bytes,mtime_iso,is_symlink,symlink_target,symlink_ok,extractor,tags,error,
-   n_obs,n_vars,meta,is_dir,parent_key,depth,name,path_key,name_key,sort_key,indexed_at)
-VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22)";
+   n_obs,n_vars,meta,figure_text,is_dir,parent_key,depth,name,path_key,name_key,sort_key,indexed_at)
+VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23)";
 
 /// The same INSERT plus `ON CONFLICT(path_key) DO UPDATE` — the idempotent UPSERT used by the ingest
 /// (where the UNIQUE `path_key` index already exists in the v2 schema).
 pub(crate) const UPSERT_SQL: &str = "\
 INSERT INTO entries
   (path,category,ext,size_bytes,mtime_iso,is_symlink,symlink_target,symlink_ok,extractor,tags,error,
-   n_obs,n_vars,meta,is_dir,parent_key,depth,name,path_key,name_key,sort_key,indexed_at)
-VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22)
+   n_obs,n_vars,meta,figure_text,is_dir,parent_key,depth,name,path_key,name_key,sort_key,indexed_at)
+VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23)
 ON CONFLICT(path_key) DO UPDATE SET
   path=excluded.path, category=excluded.category, ext=excluded.ext, size_bytes=excluded.size_bytes,
   mtime_iso=excluded.mtime_iso, is_symlink=excluded.is_symlink, symlink_target=excluded.symlink_target,
   symlink_ok=excluded.symlink_ok, extractor=excluded.extractor, tags=excluded.tags, error=excluded.error,
-  n_obs=excluded.n_obs, n_vars=excluded.n_vars, meta=excluded.meta, is_dir=excluded.is_dir,
+  n_obs=excluded.n_obs, n_vars=excluded.n_vars, meta=excluded.meta,
+  figure_text=excluded.figure_text, is_dir=excluded.is_dir,
   parent_key=excluded.parent_key, depth=excluded.depth, name=excluded.name,
   name_key=excluded.name_key, sort_key=excluded.sort_key, indexed_at=excluded.indexed_at";
 
@@ -155,6 +156,7 @@ pub(crate) struct RowValues {
     n_obs: Option<i64>,
     n_vars: Option<i64>,
     meta: String,
+    figure_text: Option<String>,
     is_dir: i64,
     parent_key: String,
     depth: i64,
@@ -171,6 +173,8 @@ impl RowValues {
     pub(crate) fn from_entry(e: &ManifestEntry, now_iso: &str) -> Self {
         let name = basename_of(&e.path).to_string();
         let path_key = norm_key(&e.path);
+        let shape = shape_fields(&e.meta);
+        let (meta, figure_text) = split_figure_text(&e.meta);
         RowValues {
             path: e.path.clone(),
             category: e.category.clone(),
@@ -183,9 +187,10 @@ impl RowValues {
             extractor: e.extractor.clone(),
             tags: serde_json::to_string(&e.tags).unwrap_or_else(|_| "[]".into()),
             error: e.error.clone(),
-            n_obs: int_meta_field(&e.meta, "n_obs"),
-            n_vars: int_meta_field(&e.meta, "n_vars"),
-            meta: e.meta.get().to_string(),
+            n_obs: shape.0,
+            n_vars: shape.1,
+            meta,
+            figure_text,
             is_dir: 0,
             parent_key: norm_key(parent_of(&e.path)),
             depth: depth_of(&e.path),
@@ -213,6 +218,7 @@ impl RowValues {
             extractor: "dir".into(),
             tags: "[]".into(),
             error: None,
+            figure_text: None,
             n_obs: None,
             n_vars: None,
             meta: "{}".into(),
@@ -234,7 +240,21 @@ impl RowValues {
         &self.parent_key
     }
 
-    /// Bind the 22 column values and execute the prepared statement (either [`UPSERT_SQL`] or the
+    /// Carry a figure text that is NOT in this row's blob — the reuse path's only route.
+    ///
+    /// Once the words have been split out of `meta`, an unchanged file re-read from the index has a
+    /// clean blob and nothing left to split, so a plain rebuild would write NULL over the column and
+    /// the figure text would survive exactly one refresh. The reconcile therefore hands back what
+    /// the previous row held. A value found in the blob always wins, so a re-extracted file that
+    /// genuinely lost its text is not resurrected by a stale column.
+    pub(crate) fn or_prior_figure_text(mut self, prior: Option<String>) -> Self {
+        if self.figure_text.is_none() {
+            self.figure_text = prior;
+        }
+        self
+    }
+
+    /// Bind the 23 column values and execute the prepared statement (either [`UPSERT_SQL`] or the
     /// plain [`INSERT_SQL`], depending on whether a UNIQUE `path_key` conflict target exists yet).
     pub(crate) fn bind_exec(&self, stmt: &mut rusqlite::Statement<'_>) -> Result<(), String> {
         stmt.execute(params![
@@ -252,6 +272,7 @@ impl RowValues {
             self.n_obs,
             self.n_vars,
             self.meta,
+            self.figure_text,
             self.is_dir,
             self.parent_key,
             self.depth,
@@ -266,14 +287,105 @@ impl RowValues {
     }
 }
 
+/// The three keys the SVG figure-text extractor contributes. They are lifted OUT of `meta` and into
+/// the dedicated `figure_text` column, exactly as `export_sqlite._split_figure_text` does.
+const FIGURE_TEXT_KEYS: [&str; 3] = ["figure_text", "figure_text_mode", "figure_text_truncated"];
+
+/// Split one entry's descriptor blob into `(meta without the figure keys, the figure text)`.
+///
+/// THIS IS THE EXCLUSION BOUNDARY FOR FIGURE TEXT, and the live writer was missing it. The default
+/// search scans `meta`; leaving the words rendered inside every SVG in there folds them into every
+/// search, which is the exact opposite of the opt-in the "figure text" checkbox exists to provide —
+/// and stores the same text twice, once per column. Measured on a real 113,444-file index before
+/// this fix: 5,677 rows carried the figure text in BOTH columns, the default search blob was 86 MB
+/// instead of 30 MB, and the checkbox changed no result because the words were already in the
+/// default haystack.
+///
+/// A blob with no figure keys — every file that is not an SVG, so the overwhelming majority — is
+/// returned BYTE-FOR-BYTE as it arrived, preserving the §4.7 verbatim-meta contract. Only an SVG's
+/// blob is rebuilt, and rebuilding re-orders its keys (serde sorts them); that is invisible to the
+/// app, which parses `meta` rather than comparing its bytes, and the untouched text still lives in
+/// the JSON manifest that `content_digest` is computed from.
+fn split_figure_text(meta: &RawValue) -> (String, Option<String>) {
+    let raw = meta.get();
+    // Cheap reject first: parsing every blob to look for a key almost none of them have would cost
+    // a full JSON parse per file on the ingest's hot path.
+    if !FIGURE_TEXT_KEYS.iter().any(|k| raw.contains(k)) {
+        return (raw.to_string(), None);
+    }
+    let parsed: serde_json::Value = match serde_json::from_str(raw) {
+        Ok(v) => v,
+        Err(_) => return (raw.to_string(), None),
+    };
+    let map = match parsed.as_object() {
+        Some(m) => m,
+        None => return (raw.to_string(), None),
+    };
+    if !FIGURE_TEXT_KEYS.iter().any(|k| map.contains_key(*k)) {
+        return (raw.to_string(), None); // the substring matched a VALUE, not a key
+    }
+    // The extractor writes a list of words; join them and lowercase, matching the Python side so
+    // the two writers produce an identical column.
+    let text = match map.get("figure_text") {
+        Some(serde_json::Value::Array(words)) => {
+            let joined = words
+                .iter()
+                .map(|w| match w {
+                    serde_json::Value::String(t) => t.clone(),
+                    other => other.to_string(),
+                })
+                .collect::<Vec<_>>()
+                .join(" ")
+                .to_lowercase();
+            (!joined.is_empty()).then_some(joined)
+        }
+        Some(serde_json::Value::String(t)) if !t.is_empty() => Some(t.to_lowercase()),
+        Some(serde_json::Value::Null) | None => None,
+        Some(other) => Some(other.to_string().to_lowercase()),
+    };
+    let clean: serde_json::Map<_, _> = map
+        .iter()
+        .filter(|(k, _)| !FIGURE_TEXT_KEYS.contains(&k.as_str()))
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
+    let clean_json =
+        serde_json::to_string(&serde_json::Value::Object(clean)).unwrap_or_else(|_| "{}".into());
+    (clean_json, text)
+}
+
 /// Extract an integer meta field with `export_sqlite`'s `isinstance(int)` semantics (§6.3): a JSON
 /// integer → its value; a float / null / missing / non-number → `None`.
-fn int_meta_field(meta: &RawValue, key: &str) -> Option<i64> {
-    let v: serde_json::Value = serde_json::from_str(meta.get()).ok()?;
+fn int_of(v: &serde_json::Value, key: &str) -> Option<i64> {
     match v.get(key) {
         Some(serde_json::Value::Number(n)) if n.is_i64() || n.is_u64() => n.as_i64(),
         _ => None,
     }
+}
+
+/// The two denormalized SHAPE columns for one entry: `(n_obs, n_vars)`.
+///
+/// These exist so the list's shape cell and the inspector's headline number are an index scan
+/// rather than a JSON parse. They were filled from the h5ad keys ALONE, which is why every csv,
+/// spreadsheet and parquet showed an empty shape even though the crawler had recorded both numbers
+/// — under different key names. Each kind of table writes the same two facts under its own names:
+///
+///   h5ad          n_obs / n_vars
+///   csv, tsv      row_count / n_columns
+///   xlsx, xlsm    row_count / n_columns   (single-sheet workbooks only — a multi-sheet workbook
+///                                          has no one shape, and reports none)
+///   parquet       num_rows  / n_columns
+///
+/// First key present wins, so an h5ad is unaffected and nothing else can shadow it.
+fn shape_fields(meta: &RawValue) -> (Option<i64>, Option<i64>) {
+    let v: serde_json::Value = match serde_json::from_str(meta.get()) {
+        Ok(v) => v,
+        Err(_) => return (None, None),
+    };
+    let rows = int_of(&v, "n_obs")
+        .or_else(|| int_of(&v, "row_count"))
+        .or_else(|| int_of(&v, "num_rows"));
+    let cols = int_of(&v, "n_vars").or_else(|| int_of(&v, "n_columns"));
+    (rows, cols)
 }
 
 // ── directory synthesis (§2.5) ───────────────────────────────────────────────────────────────────
@@ -427,16 +539,19 @@ pub fn migrate_to_v2(conn: &Connection) -> Result<(), String> {
             c.execute_batch(CREATE_V2_INDEXES).map_err(|e| format!("v2 idx: {e}"))?;
             c.execute_batch(CREATE_FTS).map_err(|e| format!("fts: {e}"))?;
             c.execute_batch(CREATE_SCHEMA_META).map_err(|e| format!("schema_meta: {e}"))?;
-        } else if !column_exists(c, "entries", "is_dir")? {
-            // Legacy v1 shape → widen + backfill + synthesize.
-            migrate_v1_rows(c)?;
-        }
-        // v3: the SVG figure-text column. Added separately from the v2 tree widen because a db
-        // may already be at v2 (so `migrate_v1_rows` above is skipped) and still lack it. O(1)
-        // metadata-only ADD COLUMN; the values arrive with the next `export-sqlite` / ingest.
-        if !column_exists(c, "entries", "figure_text")? {
-            c.execute_batch("ALTER TABLE entries ADD COLUMN figure_text TEXT;")
-                .map_err(|e| format!("add figure_text: {e}"))?;
+        } else {
+            // v3: the SVG figure-text column, widened BEFORE any row is written. A db may already
+            // be at v2 (so the v1 widen below is skipped) and still lack it, and the dir rows the
+            // v1 path synthesizes are inserted with the full column list — so the column has to
+            // exist first. O(1) metadata-only ADD COLUMN.
+            if !column_exists(c, "entries", "figure_text")? {
+                c.execute_batch("ALTER TABLE entries ADD COLUMN figure_text TEXT;")
+                    .map_err(|e| format!("add figure_text: {e}"))?;
+            }
+            if !column_exists(c, "entries", "is_dir")? {
+                // Legacy v1 shape → widen + backfill + synthesize.
+                migrate_v1_rows(c)?;
+            }
         }
         // schema_meta may be absent on a legacy db even after ALTER.
         c.execute_batch(CREATE_SCHEMA_META).map_err(|e| format!("schema_meta: {e}"))?;
@@ -673,6 +788,160 @@ mod tests {
                 "symlink_ok":null,"extractor":"csv","tags":[],"meta":{meta}}}"#
         ))
         .unwrap()
+    }
+
+    /// Every kind of table records its shape under its own key names. All of them must reach the
+    /// two denormalized columns, or the list's shape cell and the inspector's headline number are
+    /// blank for a file whose numbers the crawler already had.
+    fn svg_entry(meta: &str) -> ManifestEntry {
+        serde_json::from_str(&format!(
+            r#"{{"path":"f/plot.svg","category":"figure","ext":"svg","size_bytes":10,
+                "mtime_iso":"2026-04-20T07:21:29Z","is_symlink":false,"symlink_target":null,
+                "symlink_ok":null,"extractor":"image","tags":[],"meta":{meta}}}"#
+        ))
+        .unwrap()
+    }
+
+    /// The words drawn inside an SVG belong in their own column, NOT in the blob the default search
+    /// scans — otherwise every search silently includes figure text and the opt-in checkbox that
+    /// exists to add it changes nothing.
+    #[test]
+    fn figure_text_leaves_the_default_search_blob_and_lands_in_its_own_column() {
+        let e = svg_entry(
+            r#"{"figure_text":["HMGCR","log2FC","Braak"],"figure_text_mode":"full",
+                "figure_text_truncated":false,"width":640}"#,
+        );
+        let row = RowValues::from_entry(&e, "2026-04-20T07:21:29Z");
+        assert_eq!(row.figure_text.as_deref(), Some("hmgcr log2fc braak"));
+        for key in FIGURE_TEXT_KEYS {
+            assert!(!row.meta.contains(key), "{key} still in the default-search blob: {}", row.meta);
+        }
+        assert!(row.meta.contains("width"), "the rest of the blob must survive: {}", row.meta);
+    }
+
+    /// The columns must survive the round trip through the real UPSERT — a unit test on the split
+    /// alone would still pass if the statement bound its 23 values to the wrong columns.
+    #[test]
+    fn the_split_survives_the_real_upsert_into_a_real_table() {
+        let c = mem_v2();
+        let e = svg_entry(r#"{"figure_text":["HMGCR","Braak"],"figure_text_mode":"full","width":640}"#);
+        let row = RowValues::from_entry(&e, "2026-04-20T07:21:29Z");
+        let mut st = c.prepare(UPSERT_SQL).unwrap();
+        row.bind_exec(&mut st).unwrap();
+        drop(st);
+
+        let (meta, fig): (String, Option<String>) = c
+            .query_row("SELECT meta, figure_text FROM entries WHERE path='f/plot.svg'", [], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
+            .unwrap();
+        assert_eq!(fig.as_deref(), Some("hmgcr braak"));
+        assert!(!meta.contains("figure_text"), "figure text leaked into the default blob: {meta}");
+        assert!(meta.contains("640"));
+
+        // And the same row upserted twice must not resurrect it.
+        let mut st = c.prepare(UPSERT_SQL).unwrap();
+        RowValues::from_entry(&e, "2026-04-21T07:21:29Z").bind_exec(&mut st).unwrap();
+        drop(st);
+        let n: i64 = c
+            .query_row("SELECT COUNT(*) FROM entries WHERE meta LIKE '%figure_text%'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 0);
+    }
+
+    /// The common case must stay byte-identical — re-serializing every blob would reorder the keys
+    /// of every file in the index to strip a key almost none of them have.
+    #[test]
+    fn a_blob_without_figure_keys_is_stored_byte_for_byte() {
+        let raw = r#"{"n_columns":11,"row_count":6387,"delimiter":","}"#;
+        let row = RowValues::from_entry(&entry("t.csv", raw), "2026-04-20T07:21:29Z");
+        assert_eq!(row.meta, raw);
+        assert_eq!(row.figure_text, None);
+    }
+
+    /// The words must survive an unchanged file being re-read from the index. Once split out of the
+    /// blob there is nothing left to re-derive them from, so a second refresh would blank the column.
+    #[test]
+    fn figure_text_survives_a_refresh_that_reuses_the_already_split_blob() {
+        // Pass 1: fresh extraction, words still in the blob.
+        let first = RowValues::from_entry(
+            &svg_entry(r#"{"figure_text":["HMGCR"],"width":640}"#),
+            "2026-04-20T07:21:29Z",
+        );
+        assert_eq!(first.figure_text.as_deref(), Some("hmgcr"));
+
+        // Pass 2: the file has not changed, so the reconcile replays the STORED blob — now clean.
+        let stored = format!(r#"{{"path":"f/plot.svg","category":"figure","ext":"svg","size_bytes":10,
+            "mtime_iso":"2026-04-20T07:21:29Z","is_symlink":false,"symlink_target":null,
+            "symlink_ok":null,"extractor":"image","tags":[],"meta":{}}}"#, first.meta);
+        let replayed: ManifestEntry = serde_json::from_str(&stored).unwrap();
+        let second = RowValues::from_entry(&replayed, "2026-04-21T07:21:29Z")
+            .or_prior_figure_text(first.figure_text.clone());
+        assert_eq!(second.figure_text.as_deref(), Some("hmgcr"), "the column was blanked on refresh");
+    }
+
+    /// A file that genuinely lost its figure text must not have it resurrected from the old column.
+    #[test]
+    fn a_freshly_extracted_blob_wins_over_a_stale_column() {
+        let now_has_text = RowValues::from_entry(
+            &svg_entry(r#"{"figure_text":["CLU"],"width":640}"#),
+            "2026-04-21T07:21:29Z",
+        )
+        .or_prior_figure_text(Some("hmgcr".into()));
+        assert_eq!(now_has_text.figure_text.as_deref(), Some("clu"));
+    }
+
+    /// An SVG the extractor found no text in gets a NULL column, not an empty string that would
+    /// make `figure_text IS NOT NULL` a lie.
+    #[test]
+    fn an_svg_with_no_readable_text_gets_no_column_value() {
+        for meta in [r#"{"figure_text":[],"width":12}"#, r#"{"figure_text":null,"width":12}"#] {
+            let row = RowValues::from_entry(&svg_entry(meta), "2026-04-20T07:21:29Z");
+            assert_eq!(row.figure_text, None, "from {meta}");
+            assert!(!row.meta.contains("figure_text"), "from {meta}");
+        }
+    }
+
+    /// A blob that merely MENTIONS the phrase in a value is not a figure-text blob; the cheap
+    /// substring pre-check must not cause it to be rewritten.
+    #[test]
+    fn the_cheap_prescan_does_not_strip_a_value_that_merely_says_figure_text() {
+        let raw = r#"{"first_line":"builds figure_text for each panel"}"#;
+        let row = RowValues::from_entry(&entry("s.py", raw), "2026-04-20T07:21:29Z");
+        assert_eq!(row.meta, raw);
+        assert_eq!(row.figure_text, None);
+    }
+
+    #[test]
+    fn shape_denorm_reads_every_table_flavour_and_h5ad_still_wins() {
+        let cases: [(&str, Option<i64>, Option<i64>); 6] = [
+            // h5ad — unchanged, and its keys take precedence over any other present.
+            (r#"{"n_obs":333225,"n_vars":36601}"#, Some(333_225), Some(36_601)),
+            (r#"{"n_obs":10,"n_vars":2,"row_count":999,"n_columns":999}"#, Some(10), Some(2)),
+            // csv / tsv / single-sheet xlsx
+            (r#"{"row_count":6387,"n_columns":11}"#, Some(6387), Some(11)),
+            // parquet (pyarrow's own field name for the row count)
+            (r#"{"num_rows":1202898,"n_columns":9}"#, Some(1_202_898), Some(9)),
+            // a multi-sheet workbook has no one shape and must claim none
+            (r#"{"n_sheets":11,"sheet_names":["a","b"]}"#, None, None),
+            // an unreadable file
+            (r#"{}"#, None, None),
+        ];
+        for (meta, want_rows, want_cols) in cases {
+            let row = RowValues::from_entry(&entry("t.csv", meta), "2026-04-20T07:21:29Z");
+            assert_eq!(row.n_obs, want_rows, "rows from {meta}");
+            assert_eq!(row.n_vars, want_cols, "cols from {meta}");
+        }
+    }
+
+    /// A row count that is not a JSON integer is not a row count.
+    #[test]
+    fn shape_denorm_ignores_null_and_float_row_counts() {
+        for meta in [r#"{"row_count":null,"n_columns":4}"#, r#"{"row_count":3.5,"n_columns":4}"#] {
+            let row = RowValues::from_entry(&entry("t.csv", meta), "2026-04-20T07:21:29Z");
+            assert_eq!(row.n_obs, None, "rows from {meta}");
+            assert_eq!(row.n_vars, Some(4), "cols from {meta}");
+        }
     }
 
     #[test]
