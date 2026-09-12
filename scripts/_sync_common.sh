@@ -16,9 +16,25 @@
 # is release-only and is NEVER synced in either direction.
 set -euo pipefail
 
-# The home working copy. Override with LENS_HOME if the research repo moves.
-HOME_DIR_DEFAULT="${LENS_HOME:?set LENS_HOME to your working copy}"
-HOME_DIR="${LENS_HOME:-$HOME_DIR_DEFAULT}"
+# The home working copy — the Lens sources inside the larger research repository.
+#
+# Deliberately NOT hardcoded: this repository is public, and the path names a private
+# research folder. Resolution order: the LENS_HOME environment variable, else a
+# .lens-home file in the repository root (one line, gitignored, yours alone).
+_home_file="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/.lens-home"
+if [ -n "${LENS_HOME:-}" ]; then
+  HOME_DIR="$LENS_HOME"
+elif [ -f "$_home_file" ]; then
+  HOME_DIR="$(sed -e 's/[[:space:]]*$//' -e '/^[[:space:]]*$/d' -e '/^#/d' "$_home_file" | head -1)"
+else
+  echo "Set LENS_HOME to your working copy of the research repo's tools/repo_index," >&2
+  echo "or write that path into $_home_file (one line)." >&2
+  exit 2
+fi
+if [ -z "$HOME_DIR" ]; then
+  echo "No home working copy resolved — LENS_HOME is empty and $_home_file has no path." >&2
+  exit 2
+fi
 
 # This repository (the script lives in <repo>/scripts/).
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

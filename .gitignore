@@ -20,3 +20,9 @@ venv/
 
 # ── an index built while testing (never commit someone's file listing) ──────────
 _repo_index/
+
+# Local-only: the path to the research-repo working copy (never published).
+.lens-home
+
+# Design + research notes: kept locally, deliberately not published.
+docs/
