@@ -68,7 +68,25 @@ single-cell files carrying that annotation — neither file is opened.
 
 ## Install
 
-1. Double-click `Lens.dmg` and drag **Lens** into **Applications**.
+### Get the installer
+
+**Direct link — always the newest version:**
+[github.com/declanbx/lens/releases/latest](https://github.com/declanbx/lens/releases/latest)
+
+Or find it by hand: open the repository page, look down the **right-hand column** for the
+**Releases** heading, and click it (or the version under it, e.g. "Lens 0.1.0 — Latest"). That opens
+the releases page; the newest one is at the top. Under its **Assets** list, click the `.dmg` file —
+currently **`Lens_0.1.0_universal.dmg`, 12 MB** — and it downloads to your Downloads folder. Ignore
+"Source code (zip)" and "Source code (tar.gz)": those are the code, not the app.
+
+> **The repository is private.** You must be signed in to GitHub with an account that has been given
+> access, or the page reports that it does not exist — GitHub shows the same "404" for a private
+> repository as for one that is genuinely missing, so that message usually means *no access*, not
+> *wrong link*.
+
+### Install it
+
+1. Double-click the downloaded `.dmg` and drag **Lens** into **Applications**.
 2. In Applications, **right-click Lens ▸ Open**, then click **Open** in the warning.
 3. Double-click normally from then on.
 
