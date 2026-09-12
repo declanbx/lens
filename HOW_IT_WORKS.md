@@ -18,7 +18,7 @@ names and its row count; a figure drawn as SVG contributes the words printed on 
 
 Searching and browsing then run entirely against that catalogue, which is why they are instant and
 why they do not touch your drive. On the 1.40 TB folder above, the catalogue database comes to
-193 MB — 0.014% of the data it describes, or about 388 MB counting the companion exports written
+285 MB — 0.020% of the data it describes, or about 609 MB counting the companion exports written
 beside it.
 
 Your files are never written to, moved, renamed or deleted. Lens has no way to do any of those
@@ -612,7 +612,7 @@ Nothing is hidden, and nothing is anywhere surprising.
 its companions: the same catalogue as JSON and as one-record-per-line JSON, a standalone browsable
 HTML version, a short summary for machine readers, the lineage graph, and a small lock file that stops
 two writers from working on the catalogue at once. On the 1.40 TB reference folder the database itself
-is 193 MB and the whole folder about 388 MB. Deleting it costs you the catalogue and nothing else; the
+is 285 MB and the whole folder about 609 MB. Deleting it costs you the catalogue and nothing else; the
 next index rebuilds it from scratch.
 
 **In your home Library** — `~/Library/Application Support/com.declan.lens/`. It holds the list of

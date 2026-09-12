@@ -144,7 +144,7 @@ the whole index. `/` jumps to search, `↑ ↓` move, `⏎` inspects.
 
 **The catalogue** goes into `_repo_index` inside the folder you indexed. On the folder above the
 database is **285 MB** — 0.02% of the data — and the whole folder, counting the exports written
-beside it, about 846 MB. Deleting it loses the catalogue and nothing else.
+beside it, about 609 MB. Deleting it loses the catalogue and nothing else.
 
 **While Lens is open it watches the folder.** New, changed and deleted files appear by themselves.
 **Live** parks that if a repaint is in your way, counting what waits and applying it all on release.
