@@ -28,3 +28,4 @@ _repo_index/
 docs/
 HANDOFF.md
 ROADMAP.md
+indexer/tests/test_real_files.py
