@@ -4,6 +4,17 @@ Lens is a macOS app that turns a very large research folder into something you c
 you can type. It catalogues the folder once, then answers from the catalogue — including the text
 drawn inside your figures.
 
+- **Catalogues once, then answers from the catalogue.** One pass visits every file and records the elements that matter for search; every search after that reads the catalogue instead of the disk.
+- **Nothing is copied, moved or altered.** The catalogue is written to a folder beside your data, and deleting it loses nothing else.
+- **It keeps itself current.** A live watch indexes a new or changed file on its own, touching only that path — no full re-index. A forced re-index still only reads what actually changed.
+- **Search reaches inside files, not just filenames.** Column and sheet names, single-cell annotations, function and class names — and, with one checkbox, the text drawn inside SVG figures, so a gene symbol on an axis label is findable even when it appears nowhere in the path.
+- **The right pane previews what you land on.** PNG, SVG and markdown render in full; CSV, Excel and h5ad give their row × column counts and column names.
+- **Act on a file without leaving the app** — copy its path, open it, reveal it in Finder, or, from a search result, locate it in the full folder tree.
+- **Drag files out** to copy them to Finder, or drop them straight into another app.
+- **Keyboard-driven throughout:** arrow keys to move, `/` to search, `esc` to clear.
+- **A Health tab summarises the folder** — total files, total size, and how many symlinks there are and whether they resolve.
+- **Known annoyance**: frequent and long writes to disk, such as a large data set, will cause the tree to refresh every couple seconds — the fix is to turn "Live" off, which freezes the index tree. Turn "Live" back on when the download is complete.
+
 ![Searching a gene symbol in Lens: three files match by name, and ticking "figure text" raises it to 189 by reaching the labels drawn inside SVG figures.](docs/screenshots/00_search_figure_text.gif)
 
 *Typing `HMGCR` in a 435-file folder finds **3 files** that carry it in a name. Ticking **figure
@@ -121,18 +132,6 @@ folded (`cafe` will not match `café`).
 Results rank by how many words matched, then where (folder name ▸ file name ▸ path ▸ descriptors),
 then whether the match fell on a word boundary, then your sort column. There is no relevance score.
 Type and category filters combine with whatever you typed.
-
-## What else it does
-
-- **Catalogues once, then answers from the catalogue.** One pass visits every file and records the elements that matter for search; every search after that reads the catalogue instead of the disk.
-- **Nothing is copied, moved or altered.** The catalogue is written to a folder beside your data, and deleting it loses nothing else.
-- **It keeps itself current.** A live watch indexes a new or changed file on its own, touching only that path — no full re-index. A forced re-index still only reads what actually changed.
-- **The right pane previews what you land on.** PNG, SVG and markdown render in full; CSV, Excel and h5ad give their row × column counts and column names.
-- **Act on a file without leaving the app** — copy its path, open it, reveal it in Finder, or, from a search result, locate it in the full folder tree.
-- **Drag files out** to copy them to Finder, or drop them straight into another app.
-- **Keyboard-driven throughout:** arrow keys to move, `/` to search, `esc` to clear.
-- **A Health tab summarises the folder** — total files, total size, and how many symlinks there are and whether they resolve.
-- **Known annoyance**: frequent and long writes to disk, such as a large data set, will cause the tree to refresh every couple seconds — the fix is to turn "Live" off, which freezes the index tree. Turn "Live" back on when the download is complete.
 
 ---
 
