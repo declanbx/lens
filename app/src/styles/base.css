@@ -16,18 +16,18 @@
 
 :root {
   /* ---- Canvas (deep, faintly luminous so glass has light to refract) ---- */
-  --canvas-0:#090c12;     /* deepest */
-  --canvas-1:#0b0e14;
-  --canvas-2:#0d1117;     /* base (GitHub-dark lineage, preserved) */
+  --canvas-0:#060606;     /* deepest */
+  --canvas-1:#090909;
+  --canvas-2:#0d0d0d;     /* base — neutral black (the GitHub-navy lineage was retired 2026-09-14) */
 
   /* ---- Liquid-glass material — dark-tinted frost, 3 elevations ---------- */
   /* Tint is dark (legibility on a dark UI); vibrancy comes from saturate().  */
   /* Real glass = a flat translucent fill + a strong backdrop blur that REFRACTS
      whatever scrolls beneath it. NO sheen, NO specular edge — the only visual
      interest is the distortion of the content behind (figpolish restraint).   */
-  --glass-1:rgba(16,20,27,0.26);    /* chrome bars (files scroll under them)    */
-  --glass-2:rgba(20,25,33,0.44);    /* standing panels / sticky hero            */
-  --glass-3:rgba(22,28,38,0.28);    /* floating: menus / popovers / toast       */
+  --glass-1:rgba(18,18,18,0.26);    /* chrome bars (files scroll under them)    */
+  --glass-2:rgba(24,24,24,0.44);    /* standing panels / sticky hero            */
+  --glass-3:rgba(28,28,28,0.28);    /* floating: menus / popovers / toast       */
   /* moderate blur keeps the refracted rails recognisably COLOURED (not washed);
      high saturation makes the bleed vivid through the transparent fill.        */
   --glass-blur:saturate(190%) blur(24px);
@@ -43,13 +43,13 @@
   --lift-3:0 18px 54px rgba(0,0,0,0.58);
 
   /* ---- Data substrate (NO blur behind text — crisp + dense) ------------- */
-  --substrate:rgba(13,17,23,0.78);  /* tree / card content backing           */
-  --substrate-solid:#0e1219;
+  --substrate:rgba(15,15,15,0.78);  /* tree / card content backing           */
+  --substrate-solid:#101010;
 
   /* ---- Ink ------------------------------------------------------------- */
   /* --faint raised to clear WCAG AA (~4.6:1) for load-bearing 10-11px text.  */
-  --fg:#e9eef5; --fg-2:#c5cfda; --muted:#8b98a5; --faint:#7c8896;
-  --on-accent:#06101f;
+  --fg:#ededed; --fg-2:#cecece; --muted:#969696; --faint:#878787;
+  --on-accent:#120c08;
 
   /* ---- Lines ----------------------------------------------------------- */
   --line:rgba(255,255,255,0.07);
@@ -123,14 +123,14 @@ body{
   -webkit-font-smoothing:antialiased;
   text-rendering:optimizeLegibility;
   background:
-    radial-gradient(1100px 640px at 16% -10%, rgba(88,166,255,0.10), transparent 60%),
-    radial-gradient(980px 760px at 108% 4%,  rgba(188,140,255,0.085), transparent 56%),
-    radial-gradient(820px 640px at 46% 122%, rgba(126,231,135,0.05), transparent 60%),
+    radial-gradient(1100px 640px at 16% -10%, rgba(255,255,255,0.055), transparent 60%),
+    radial-gradient(980px 760px at 108% 4%,  rgba(255,255,255,0.040), transparent 56%),
+    radial-gradient(820px 640px at 46% 122%, rgba(255,255,255,0.022), transparent 60%),
     linear-gradient(180deg, var(--canvas-1), var(--canvas-2) 42%, var(--canvas-0));
   background-attachment:fixed;
 }
 .mono{ font-family:var(--font-mono); font-variant-numeric:tabular-nums; }
-::selection{ background:rgba(88,166,255,0.30); }
+::selection{ background:rgba(217,119,87,0.32); }
 
 /* scrollbars — thin, Apple-quiet */
 *::-webkit-scrollbar{ width:10px; height:10px; }
@@ -161,7 +161,7 @@ body{
 }
 /* CSP/engine fallback: if backdrop-filter is unavailable, glass goes solid (never see-through-to-nothing). WKWebView supports it; this is just safety. */
 @supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
-  .glass{ background:#10141b; } .glass-2{ background:#141922; } .glass-3{ background:#171d27; }
+  .glass{ background:#141414; } .glass-2{ background:#191919; } .glass-3{ background:#1d1d1d; }
 }
 
 /* ============================ PRIMITIVES =============================== */
@@ -186,7 +186,7 @@ body{
   transition:border-color var(--dur) var(--ease), background var(--dur) var(--ease), color var(--dur) var(--ease);
 }
 .iconbtn:hover{ border-color:var(--line-2); background:rgba(255,255,255,0.08); color:var(--fg); }
-.iconbtn.on{ color:var(--accent); border-color:rgba(88,166,255,0.45); background:var(--accent-soft); }
+.iconbtn.on{ color:var(--accent); border-color:rgba(217,119,87,0.45); background:var(--accent-soft); }
 
 /* segmented control */
 .seg{ display:inline-flex; padding:2px; gap:2px; border-radius:var(--r-md);
@@ -218,7 +218,7 @@ body{
 .chip .shp{ color:var(--faint); }
 .chip.hit{ color:var(--hit); background:var(--hit-bg);
   border-color:color-mix(in srgb, var(--hit) 55%, transparent); font-weight:var(--fw-med); }
-.chip.umap{ color:var(--accent); border-color:rgba(88,166,255,0.45); background:var(--accent-soft); }
+.chip.umap{ color:var(--accent); border-color:rgba(217,119,87,0.45); background:var(--accent-soft); }
 
 /* filter chip (category, with on/off + colour border when active) */
 .filterchip{ display:inline-flex; align-items:center; gap:5px;

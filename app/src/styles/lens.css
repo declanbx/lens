@@ -134,7 +134,7 @@
 }
 .figtoggle:hover{ color:var(--fg); border-color:var(--line-2); }
 .figtoggle:has(input:checked){
-  color:var(--accent); border-color:rgba(217,119,87,0.45); background:var(--accent-soft);
+  color:var(--accent); border-color:rgba(217,119,87,0.55); background:transparent;
 }
 .figtoggle input{ accent-color:var(--accent); margin:0; cursor:pointer; }
 .figtoggle:focus-within{ box-shadow:var(--focus-ring); }
@@ -143,8 +143,8 @@
    itself cannot show. Without the badge the hit looks arbitrary. */
 .figbadge{
   flex:0 0 auto; margin-left:8px; padding:0 6px;
-  border:1px solid rgba(217,119,87,0.40); border-radius:var(--r-sm, 4px);
-  background:var(--accent-soft); color:var(--accent);
+  border:1px solid rgba(217,119,87,0.55); border-radius:var(--r-sm, 4px);
+  background:transparent; color:var(--accent);
   font-size:var(--fs-2xs); letter-spacing:.03em; line-height:16px;
   text-transform:lowercase; white-space:nowrap; pointer-events:none;
 }
@@ -1101,7 +1101,7 @@ details.raw[open] > summary::before{ content:"▾ "; }
   position:fixed; inset:0; z-index:80;
   display:flex; align-items:center; justify-content:center;
   padding:var(--sp-7);
-  background:rgba(9,12,18,0.66);
+  background:rgba(6,6,6,0.66);
   -webkit-backdrop-filter:saturate(140%) blur(10px);
   backdrop-filter:saturate(140%) blur(10px);
 }
