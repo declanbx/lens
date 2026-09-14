@@ -1,68 +1,34 @@
 # Lens
 
 Lens is a macOS app that turns a very large research folder into something you can search as fast as
-you can type, giving a smoother experience than Finder.
+you can type. It catalogues the folder once, then answers from the catalogue — including the text
+drawn inside your figures.
 
-- **Catalogues once, then answers from the catalogue.** One pass visits every file and records the elements that matter for search; every search after that reads the catalogue instead of the disk.
-- **Nothing is copied, moved or altered.** The catalogue is written to a folder beside your data, and deleting it loses nothing else.
-- **It keeps itself current.** A live watch indexes a new or changed file on its own, touching only that path — no full re-index. A forced re-index still only reads what actually changed.
-- **Search reaches inside files, not just filenames.** Column and sheet names, single-cell annotations, function and class names — and, with one checkbox, the text drawn inside SVG figures, so a gene symbol on an axis label is findable even when it appears nowhere in the path.
-- **The right pane previews what you land on.** PNG, SVG and markdown render in full; CSV, Excel and h5ad give their row × column counts and column names.
-- **Act on a file without leaving the app** — copy its path, open it, reveal it in Finder, or, from a search result, locate it in the full folder tree.
-- **Drag files out** to copy them to Finder, or drop them straight into another app.
-- **Keyboard-driven throughout:** arrow keys to move, `/` to search, `esc` to clear.
-- **A Health tab summarises the folder** — total files, total size, and how many symlinks there are and whether they resolve.
-- **Known annoyance**: frequent and long writes to disk, such as a large data set, will cause the tree to refresh every couple seconds - the fix is to turn “Live” off, which freezes the index tree. Turn “Live” back on when the download is complete.
+![Searching a gene symbol in Lens: three files match by name, and ticking "figure text" raises it to 189 by reaching the labels drawn inside SVG figures.](docs/screenshots/00_search_figure_text.gif)
 
-Every number below was measured against a real working folder of **113,444 files and 1.40 TB**.
+*Typing `HMGCR` in a 435-file folder finds **3 files** that carry it in a name. Ticking **figure
+text** raises that to **189** — the other 186 carry it only as a label drawn inside an SVG, where no
+filename search can reach. Recorded against a synthetic demo folder so this page shows no real
+directory names; every measurement quoted below comes from a working folder of **113,444 files and
+1.40 TB**.*
 
 ---
 
-## What gets searched
+## What it finds that nothing else finds
 
-Lens builds **one line of text per file** and searches that line:
+Three things a filename search cannot reach, all read without opening the file properly:
 
-> **path** + **category, extension and reader** + **tags** + the **descriptors** read from the file
+**Text drawn inside figures.** Words rendered in an SVG — axis labels, legends, gene symbols — live
+in their own 3.95 MB store and join the search when the **figure text** box is ticked. On the
+113,444-file folder, `HMGCR` returns **152** files by name, path and descriptors, and **133 further
+files** carry it only as figure text.
 
-Descriptors come from a cheap read — a header, a footer, or one streaming pass — never a full load.
-What that yields depends entirely on the type; **52.9% of files carry a descriptor beyond name, size
-and date, and 47.1% do not.**
+**Column and sheet names.** `padj` finds the result tables whose header row contains it, across CSV,
+TSV, parquet and every sheet of an Excel workbook. The cells are never read.
 
-| File type | Read | Never read |
-|---|---|---|
-| `.h5ad` single-cell matrices | shape (cells × genes), storage format, numeric type, every per-cell and per-gene annotation name, embedding and layer names *(needs `h5py`)* | the matrix values |
-| CSV / TSV / parquet | column names and the exact row count | any cell value |
-| Excel `.xlsx` / `.xlsm` | every sheet's name, header row, column count and row count | any cell value |
-| SVG figures | the words rendered inside the figure | — |
-| Markdown | first heading, first paragraph | anything later |
-| Python / R / shell | top-level function and class names, imports, first docstring line | function bodies |
-| JSON / YAML / TOML | top-level keys, files under 5 MB only | nested keys, all values |
-| Everything else (47.1% of files) | name, size, date | everything inside |
-
-**Lens reads the names of things, never the values.** Column and sheet names, annotation names,
-function and class names, top-level keys, a document's first heading — but never a spreadsheet cell,
-a matrix value, a function body, or the prose of a document or PDF.
-
-Column-name extraction can be switched off at index time. With it off, searching by column name
-finds nothing until the folder is re-indexed with it back on.
-
-**Figure text is opt-in and worth more than it looks.** Words drawn inside SVG figures live in their
-own 3.95 MB store and join the search only when the **figure text** box is ticked. Measured on the
-folder above: `HMGCR` returns **152** files by name, path and descriptors, and **133 further files**
-carry it only as text inside a figure.
-
-## How search works
-
-**Plain substring, case-insensitive.** Typing `umap` matches anywhere in the line, mid-word included.
-There is no typo tolerance, no wildcards, no regular expressions, no AND/OR, and accents are not
-folded (`cafe` will not match `café`).
-
-Results rank by how many words matched, then where (folder name ▸ file name ▸ path ▸ descriptors),
-then whether the match fell on a word boundary, then your sort column. There is no relevance score.
-Type and category filters combine with whatever you typed.
-
-Two examples: `padj` finds the result tables whose column headers include it; `Braak` finds the
-single-cell files carrying that annotation — neither file is opened.
+**Single-cell annotation names.** `Braak` finds the `.h5ad` matrices carrying that per-cell
+annotation, along with the embedding and layer names and the cells × genes shape. The matrix itself
+is never loaded.
 
 ---
 
@@ -78,11 +44,6 @@ Or find it by hand: open the repository page, look down the **right-hand column*
 the releases page; the newest one is at the top. Under its **Assets** list, click the `.dmg` file —
 currently **`Lens_0.1.0_universal.dmg`, 12 MB** — and it downloads to your Downloads folder. Ignore
 "Source code (zip)" and "Source code (tar.gz)": those are the code, not the app.
-
-> **The repository is private.** You must be signed in to GitHub with an account that has been given
-> access, or the page reports that it does not exist — GitHub shows the same "404" for a private
-> repository as for one that is genuinely missing, so that message usually means *no access*, not
-> *wrong link*.
 
 ### Install it
 
@@ -120,6 +81,58 @@ python3 -m pip install h5py pyarrow
 | `pyyaml` | more robust YAML | falls back to scanning unindented `key:` lines, which still finds top-level keys |
 
 `.toml` needs Python **3.11 or newer**; on 3.9 or 3.10 those files yield nothing.
+
+---
+
+## What gets searched
+
+Lens builds **one line of text per file** and searches that line:
+
+> **path** + **category, extension and reader** + **tags** + the **descriptors** read from the file
+
+Descriptors come from a cheap read — a header, a footer, or one streaming pass — never a full load.
+What that yields depends entirely on the type; **52.9% of files carry a descriptor beyond name, size
+and date, and 47.1% do not.**
+
+| File type | Read | Never read |
+|---|---|---|
+| `.h5ad` single-cell matrices | shape (cells × genes), storage format, numeric type, every per-cell and per-gene annotation name, embedding and layer names *(needs `h5py`)* | the matrix values |
+| CSV / TSV / parquet | column names and the exact row count | any cell value |
+| Excel `.xlsx` / `.xlsm` | every sheet's name, header row, column count and row count | any cell value |
+| SVG figures | the words rendered inside the figure | — |
+| Markdown | first heading, first paragraph | anything later |
+| Python / R / shell | top-level function and class names, imports, first docstring line | function bodies |
+| JSON / YAML / TOML | top-level keys, files under 5 MB only | nested keys, all values |
+| Everything else (47.1% of files) | name, size, date | everything inside |
+
+**Lens reads the names of things, never the values.** Column and sheet names, annotation names,
+function and class names, top-level keys, a document's first heading — but never a spreadsheet cell,
+a matrix value, a function body, or the prose of a document or PDF.
+
+Column-name extraction can be switched off at index time. With it off, searching by column name
+finds nothing until the folder is re-indexed with it back on.
+
+## How search works
+
+**Plain substring, case-insensitive.** Typing `umap` matches anywhere in the line, mid-word included.
+There is no typo tolerance, no wildcards, no regular expressions, no AND/OR, and accents are not
+folded (`cafe` will not match `café`).
+
+Results rank by how many words matched, then where (folder name ▸ file name ▸ path ▸ descriptors),
+then whether the match fell on a word boundary, then your sort column. There is no relevance score.
+Type and category filters combine with whatever you typed.
+
+## What else it does
+
+- **Catalogues once, then answers from the catalogue.** One pass visits every file and records the elements that matter for search; every search after that reads the catalogue instead of the disk.
+- **Nothing is copied, moved or altered.** The catalogue is written to a folder beside your data, and deleting it loses nothing else.
+- **It keeps itself current.** A live watch indexes a new or changed file on its own, touching only that path — no full re-index. A forced re-index still only reads what actually changed.
+- **The right pane previews what you land on.** PNG, SVG and markdown render in full; CSV, Excel and h5ad give their row × column counts and column names.
+- **Act on a file without leaving the app** — copy its path, open it, reveal it in Finder, or, from a search result, locate it in the full folder tree.
+- **Drag files out** to copy them to Finder, or drop them straight into another app.
+- **Keyboard-driven throughout:** arrow keys to move, `/` to search, `esc` to clear.
+- **A Health tab summarises the folder** — total files, total size, and how many symlinks there are and whether they resolve.
+- **Known annoyance**: frequent and long writes to disk, such as a large data set, will cause the tree to refresh every couple seconds — the fix is to turn "Live" off, which freezes the index tree. Turn "Live" back on when the download is complete.
 
 ---
 
@@ -191,24 +204,11 @@ It checks the toolchain, installs either missing architecture, installs frontend
 builds, and copies the installer and app into `release/`, printing the path. The first build takes
 several minutes; build output stays inside the repository and is git-ignored.
 
-## Keeping it in sync with the research-repo copy
-
-Lens is developed inside a larger research repository and released from this standalone one. Two
-scripts move changes between them, **both dry runs by default** — they print what would change and
-write nothing until you add `--apply`.
-
-```sh
-./scripts/sync-from-home.sh          # what would come IN from the research repo
-./scripts/sync-to-home.sh            # what would go OUT to the research repo
-```
-
-Two guards: pulling in refuses to run if this repository has uncommitted changes, so it can be
-undone; pushing out asks you to type `yes` and does not commit for you. Only the app and the crawler
-are synced — this repository's documentation, scripts and build configuration are release-only. If
-the research repository has moved, set the environment variable named in the scripts' error message.
-
 ## Where to read more
 
 [`HOW_IT_WORKS.md`](HOW_IT_WORKS.md) — what the crawl visits and skips, what is recorded per file
 type and where each capability stops, how search ranks, what updates by itself, what previews, and an
 honest list of what is not built yet.
+
+[`docs/MAINTAINING.md`](docs/MAINTAINING.md) — release engineering: syncing with the development
+copy, and rebuilding the screenshots on this page.

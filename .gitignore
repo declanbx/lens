@@ -27,10 +27,14 @@ _repo_index/
 # Design + research notes: kept locally, deliberately not published — EXCEPT the
 # screenshots and figures the README and HOW_IT_WORKS link to, which are product
 # documentation and would otherwise render as broken images.
-docs/
+docs/*
+!docs/MAINTAINING.md
 !docs/screenshots/
+docs/screenshots/*
 !docs/screenshots/*.png
+!docs/screenshots/*.gif
 !docs/figures/
+docs/figures/*
 !docs/figures/*.png
 HANDOFF.md
 ROADMAP.md
